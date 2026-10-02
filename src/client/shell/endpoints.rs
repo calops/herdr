@@ -228,7 +228,8 @@ impl ClientShellState {
         };
         let generation = endpoint.snapshot_generation;
         let switching_endpoint = endpoint_id != &self.active_endpoint_id;
-        let agent_scroll = self.agent_scroll;
+        let workspace_tree_scroll = (!self.sidebar_collapsed && !self.mobile_layout_active())
+            .then_some(self.workspace_scroll);
         if switching_endpoint {
             self.active_endpoint_id = endpoint_id.clone();
             self.pane_surface = None;
@@ -236,8 +237,9 @@ impl ClientShellState {
         }
         self.apply_active_snapshot(snapshot, generation);
         if switching_endpoint {
-            // The aggregate agent list belongs to the client, not one endpoint.
-            self.agent_scroll = agent_scroll;
+            if let Some(scroll) = workspace_tree_scroll {
+                self.workspace_scroll = scroll;
+            }
         }
         if let Some((_, pane_id)) = pending_agent_reveal {
             self.reveal_endpoint_agent(endpoint_id, &pane_id, agent_body_height);

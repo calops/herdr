@@ -21,20 +21,6 @@ impl ClientShellState {
         }
     }
 
-    fn set_sidebar_section_from_row(&mut self, row: u16, outcome: &mut ClientShellInput) {
-        let divider = self.hits.sidebar_divider;
-        if divider.height == 0 {
-            return;
-        }
-        let ratio = row.saturating_sub(divider.y) as f32 / divider.height as f32;
-        let ratio = ratio.clamp(0.1, 0.9);
-        if (self.sidebar_section_split - ratio).abs() > f32::EPSILON {
-            self.sidebar_section_split = ratio;
-            self.sidebar_section_split_manual = true;
-            outcome.repaint = true;
-        }
-    }
-
     fn pane_scrollbar_offset(
         hit: &PaneHit,
         row: u16,
@@ -551,7 +537,22 @@ impl ClientShellState {
                     .get(entry.index)
                     .map(|workspace| workspace.workspace_id.clone())
             });
-            let row = last_hit.rect.bottom();
+            let row = self
+                .hits
+                .agents
+                .iter()
+                .map(|(rect, _)| *rect)
+                .chain(
+                    self.hits
+                        .endpoint_agents
+                        .iter()
+                        .filter(|(_, endpoint_id, _)| *endpoint_id == self.active_endpoint_id)
+                        .map(|(rect, _, _)| *rect),
+                )
+                .filter(|rect| rect.y >= last_hit.rect.bottom())
+                .map(|rect| rect.bottom())
+                .max()
+                .unwrap_or(last_hit.rect.bottom());
             if row < self.hits.new_workspace.y {
                 slots.push((before, row));
             }
@@ -654,9 +655,10 @@ impl ClientShellState {
     fn agent_hover_rect(&self, point: Option<(u16, u16)>) -> Option<Rect> {
         let point = point?;
         self.hits
-            .agent_groups
+            .workspaces
             .iter()
-            .map(|(rect, _, _)| *rect)
+            .map(|hit| hit.rect)
+            .chain(self.hits.agent_groups.iter().map(|(rect, _, _)| *rect))
             .chain(self.hits.agents.iter().map(|(rect, _)| *rect))
             .chain(self.hits.endpoint_agents.iter().map(|(rect, _, _)| *rect))
             .find(|rect| super::contains(*rect, point))
@@ -1026,10 +1028,6 @@ impl ClientShellState {
                     self.set_sidebar_width_from_column(mouse.column, outcome);
                     return;
                 }
-                Some(ClientChromeDrag::SidebarSection) => {
-                    self.set_sidebar_section_from_row(mouse.row, outcome);
-                    return;
-                }
                 Some(ClientChromeDrag::WorkspaceScrollbar { grab_row_offset }) => {
                     if let Some(metrics) = self.hits.workspace_scroll_metrics {
                         let offset = crate::ui::scrollbar_offset_from_drag_row(
@@ -1041,22 +1039,6 @@ impl ClientShellState {
                         let next = metrics.max_offset_from_bottom.saturating_sub(offset);
                         if next != self.workspace_scroll {
                             self.workspace_scroll = next;
-                            outcome.repaint = true;
-                        }
-                    }
-                    return;
-                }
-                Some(ClientChromeDrag::AgentScrollbar { grab_row_offset }) => {
-                    if let Some(metrics) = self.hits.agent_scroll_metrics {
-                        let offset = crate::ui::scrollbar_offset_from_drag_row(
-                            metrics,
-                            self.hits.agent_scrollbar,
-                            mouse.row,
-                            *grab_row_offset,
-                        );
-                        let next = metrics.max_offset_from_bottom.saturating_sub(offset);
-                        if next != self.agent_scroll {
-                            self.agent_scroll = next;
                             outcome.repaint = true;
                         }
                     }
@@ -1357,11 +1339,10 @@ impl ClientShellState {
                             );
                         }
                     }
-                    ClientChromeDrag::SidebarWidth | ClientChromeDrag::SidebarSection => {
+                    ClientChromeDrag::SidebarWidth => {
                         self.persist_chrome_preferences(outcome);
                     }
                     ClientChromeDrag::WorkspaceScrollbar { .. }
-                    | ClientChromeDrag::AgentScrollbar { .. }
                     | ClientChromeDrag::HelpScrollbar { .. }
                     | ClientChromeDrag::NavigatorScrollbar { .. }
                     | ClientChromeDrag::ProductAnnouncementScrollbar { .. }
@@ -1895,23 +1876,6 @@ impl ClientShellState {
                     outcome,
                 );
             }
-            MouseEventKind::ScrollUp if super::contains(self.hits.agent_body, point) => {
-                let next = self.agent_scroll.saturating_sub(1);
-                if next != self.agent_scroll {
-                    self.agent_scroll = next;
-                    outcome.repaint = true;
-                }
-            }
-            MouseEventKind::ScrollDown if super::contains(self.hits.agent_body, point) => {
-                let next = self
-                    .agent_scroll
-                    .saturating_add(1)
-                    .min(self.hits.agent_max_scroll);
-                if next != self.agent_scroll {
-                    self.agent_scroll = next;
-                    outcome.repaint = true;
-                }
-            }
             MouseEventKind::ScrollUp if super::contains(self.hits.workspace_body, point) => {
                 let next = self.workspace_scroll.saturating_sub(1);
                 if next != self.workspace_scroll {
@@ -1951,8 +1915,6 @@ impl ClientShellState {
                 if let Some(group) = agent_group {
                     if !self.collapsed_agent_groups.remove(&group) {
                         self.collapsed_agent_groups.insert(group);
-                        // The shorter list may no longer reach the current scroll offset.
-                        self.agent_scroll = 0;
                     }
                     outcome.repaint = true;
                     return;
@@ -1978,11 +1940,6 @@ impl ClientShellState {
                     }
                     return;
                 }
-                if super::contains(self.hits.sidebar_section_divider, point) {
-                    self.chrome_drag = Some(ClientChromeDrag::SidebarSection);
-                    self.set_sidebar_section_from_row(mouse.row, outcome);
-                    return;
-                }
                 if super::contains(self.hits.workspace_scrollbar, point) {
                     if let Some(metrics) = self.hits.workspace_scroll_metrics {
                         if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(
@@ -2005,46 +1962,6 @@ impl ClientShellState {
                             }
                         }
                     }
-                    return;
-                }
-                if super::contains(self.hits.agent_scrollbar, point) {
-                    if let Some(metrics) = self.hits.agent_scroll_metrics {
-                        if let Some(grab_row_offset) = crate::ui::scrollbar_thumb_grab_offset(
-                            metrics,
-                            self.hits.agent_scrollbar,
-                            mouse.row,
-                        ) {
-                            self.chrome_drag =
-                                Some(ClientChromeDrag::AgentScrollbar { grab_row_offset });
-                        } else {
-                            let offset = crate::ui::scrollbar_offset_from_row(
-                                metrics,
-                                self.hits.agent_scrollbar,
-                                mouse.row,
-                            );
-                            let next = metrics.max_offset_from_bottom.saturating_sub(offset);
-                            if next != self.agent_scroll {
-                                self.agent_scroll = next;
-                                outcome.repaint = true;
-                            }
-                        }
-                    }
-                    return;
-                }
-                if super::contains(self.hits.agent_sort_toggle, point) {
-                    let sort = match self.config.agent_panel_sort {
-                        crate::config::AgentPanelSortConfig::Spaces => {
-                            crate::config::AgentPanelSortConfig::Priority
-                        }
-                        crate::config::AgentPanelSortConfig::Priority => {
-                            crate::config::AgentPanelSortConfig::Spaces
-                        }
-                    };
-                    self.config.agent_panel_sort = sort;
-                    self.agent_panel_sort_manual = true;
-                    self.agent_scroll = 0;
-                    self.persist_chrome_preferences(outcome);
-                    outcome.repaint = true;
                     return;
                 }
                 if self.handle_endpoint_machine_click(point, outcome) {

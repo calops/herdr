@@ -97,12 +97,7 @@ pub(super) struct ShellHitMap {
     pub(super) endpoint_agents: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) agent_groups: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) agent_body: Rect,
-    pub(super) agent_scrollbar: Rect,
-    pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
-    pub(super) agent_max_scroll: usize,
-    pub(super) agent_sort_toggle: Rect,
     pub(super) sidebar_divider: Rect,
-    pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
@@ -189,11 +184,7 @@ pub(super) struct ClientTabPress {
 
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
-    SidebarSection,
     WorkspaceScrollbar {
-        grab_row_offset: u16,
-    },
-    AgentScrollbar {
         grab_row_offset: u16,
     },
     HelpScrollbar {
@@ -861,8 +852,6 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_collapsed_manual: bool,
     pub(super) sidebar_width: u16,
     pub(super) sidebar_width_manual: bool,
-    pub(super) sidebar_section_split: f32,
-    pub(super) sidebar_section_split_manual: bool,
     pub(super) agent_panel_sort_manual: bool,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
@@ -871,7 +860,6 @@ pub(crate) struct ClientShellState {
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: usize,
-    pub(super) agent_scroll: usize,
     pub(super) collapsed_agent_groups: HashSet<(ClientEndpointId, String)>,
     pub(super) agent_hover_point: Option<(u16, u16)>,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
@@ -992,11 +980,6 @@ impl ClientShellState {
             .sidebar_width
             .unwrap_or(config.sidebar_width)
             .clamp(min_width, max_width);
-        let sidebar_section_split = preferences
-            .sidebar_section_split
-            .filter(|split| split.is_finite())
-            .map(|split| split.clamp(0.1, 0.9))
-            .unwrap_or(0.5);
         if let Some(sort) = preferences.agent_panel_sort {
             config.agent_panel_sort = sort;
         }
@@ -1028,8 +1011,6 @@ impl ClientShellState {
             sidebar_collapsed_manual: preferences.sidebar_collapsed.is_some(),
             sidebar_width,
             sidebar_width_manual: preferences.sidebar_width.is_some(),
-            sidebar_section_split,
-            sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
             last_sidebar_divider_click: None,
             chrome_drag: None,
@@ -1038,7 +1019,6 @@ impl ClientShellState {
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
             workspace_scroll: 0,
-            agent_scroll: 0,
             collapsed_agent_groups: HashSet::new(),
             agent_hover_point: None,
             pending_agent_reveal: None,
@@ -1199,22 +1179,12 @@ impl ClientShellState {
     }
 
     pub(super) fn reveal_workspace(&mut self, workspace_id: &str) {
-        if self
-            .hits
-            .workspaces
-            .iter()
-            .any(|hit| hit.workspace_id == workspace_id)
-        {
+        if self.hits.workspaces.iter().any(|hit| {
+            hit.endpoint_id == self.active_endpoint_id && hit.workspace_id == workspace_id
+        }) {
             return;
         }
-        let target = self.snapshot.as_deref().and_then(|snapshot| {
-            self.navigation_workspace_entries(snapshot)
-                .iter()
-                .position(|entry| snapshot.workspaces[entry.index].workspace_id == workspace_id)
-        });
-        if let Some(target) = target {
-            self.workspace_scroll = target.min(self.hits.workspace_max_scroll);
-        }
+        self.reveal_focused_workspace = true;
     }
 
     pub(super) fn layout(&self, cols: u16, rows: u16) -> ClientShellLayout {
@@ -1245,7 +1215,6 @@ impl ClientShellState {
         self.workspace_press = None;
         self.tab_press = None;
         self.workspace_scroll = 0;
-        self.agent_scroll = 0;
         self.tab_scroll = 0;
         self.mobile_switcher_scroll = 0;
         self.reveal_focused_workspace = true;

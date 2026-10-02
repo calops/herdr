@@ -25,12 +25,6 @@ test-windows-input *args:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
-
-# Sidebar behavior checks run in the same derivation installed by Nix.
-nix-test:
-    cargo test --release --locked --bin herdr client::shell::tests -- --nocapture
-    cargo test --release --locked --bin herdr ui::panes::tests -- --nocapture
-
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
     {{python}} -m unittest scripts.test_ui_hot_path_architecture

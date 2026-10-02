@@ -479,13 +479,25 @@ Metadata reporters provide values only; styling stays in the local sidebar confi
 
 Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
 
-### Workspace agent groups
+### Workspace tree
 
-This fork groups the expanded desktop Agents panel by workspace when `ui.agent_panel_sort = "spaces"`. Each workspace has a bold header with its aggregate agent status and status color, followed by indented agent rows. Click the header to collapse or expand its children; its status remains visible while collapsed.
+This fork combines the expanded desktop Spaces and Agents panels into one workspace-first tree. Workspaces keep their configured metadata, and agents appear beneath their workspace. Each item supports up to two lines. One empty line separates workspace groups, including workspaces without agents.
 
-Collapsed groups are client-local. Agent shortcuts reveal their target and expand its group, including when only the local machine is configured. Local and SSH groups are independent, even when workspace IDs match. Priority sorting and plugin-defined Agent views keep their flat ordering.
+The status icons form the tree: vertical guides continue through workspace metadata and nonlast agent descriptions, `├──` connects intermediate agents, and a rounded `╰──` connects the last agent without extending below it. State-icon tokens are placed in the fixed tree-dot column while other token ordering and styling are preserved.
 
-Agent rows and group headers highlight across their full width on mouse hover using the theme's `surface1` color. Hover does not focus a pane or send input to it. The focused-row background takes precedence and also covers the indentation. Hover requires mouse capture and an active outer terminal window, and is suppressed by modal overlays. Collapsed-sidebar and mobile layouts are unchanged.
+Click a workspace label to focus that workspace; use its separate arrow to collapse or expand agent children. Either line of an agent focuses its pane. Collapsed groups are client-local, and agent shortcuts reveal their target and expand its ancestors. Local and SSH groups remain independent. Agent sorting and plugin views retain their ordering within each workspace rather than introducing another panel.
+
+For an agent name followed by its gray description, configure:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "agent"],
+  ["tab", "pane"],
+]
+```
+
+Workspace and agent hover backgrounds cover both lines and the indentation using the theme's `surface1` color. Focus and navigation-selection backgrounds take precedence. Hover never focuses a pane or sends input. The entire tree uses one scrollbar; wheel input over an agent scrolls the same workspace tree. Hover requires mouse capture and an active outer terminal window, and is suppressed by modal overlays. Collapsed-sidebar and mobile layouts retain their compact presentation.
 
 ## Notifications
 

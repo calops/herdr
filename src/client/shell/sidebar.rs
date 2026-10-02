@@ -211,10 +211,7 @@ pub(crate) fn render_sidebar(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
-    hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    let workspace_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     put_text(
         buffer,
         workspace_area.x,
@@ -226,7 +223,14 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let rows = workspace_tree_rows(
+        snapshot,
+        &ClientEndpointId::Local,
+        config,
+        state.collapsed_groups,
+        state.collapsed_agent_groups,
+        super::agent_sidebar::agent_rows(snapshot, config, None),
+    );
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -236,46 +240,42 @@ pub(crate) fn render_sidebar(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
-    let row_heights = entries
+    hits.agent_body = body;
+    let row_heights = rows
         .iter()
-        .map(|entry| {
-            snapshot
-                .workspaces
-                .get(entry.index)
-                .map(|workspace| {
-                    workspace_rows(
-                        workspace,
-                        displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
-                        entry.indented,
-                        &config.spaces,
-                    )
-                    .len()
-                    .max(1)
-                    .min(u16::MAX as usize) as u16
-                })
-                .unwrap_or(1)
-        })
+        .map(WorkspaceTreeRow::height)
         .collect::<Vec<_>>();
-    let gaps = entries
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            entries
-                .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
-        })
-        .collect::<Vec<_>>();
+    let gaps = tree_gaps(&rows);
     let mut metrics = super::scroll::list_scroll_metrics(
         &row_heights,
         &gaps,
         body.height,
         *state.workspace_scroll,
     );
-    if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
-        {
+    let reveal_navigation = !body.is_empty() && std::mem::take(state.reveal_navigation_workspace);
+    let reveal_focus = !body.is_empty() && std::mem::take(state.reveal_focused_workspace);
+    if reveal_navigation || reveal_focus {
+        let focused_agent = (!reveal_navigation)
+            .then(|| {
+                rows.iter().position(
+                    |row| matches!(row, WorkspaceTreeRow::Agent { agent, .. } if agent.focused),
+                )
+            })
+            .flatten();
+        if let Some(target) = focused_agent.or_else(|| {
+            rows.iter().position(|row| {
+                row.workspace_index().is_some_and(|index| {
+                    let workspace = &snapshot.workspaces[index];
+                    if reveal_navigation {
+                        state.selected_workspace_id.is_some_and(|target| {
+                            target.matches(&ClientEndpointId::Local, &workspace.workspace_id)
+                        })
+                    } else {
+                        workspace.focused
+                    }
+                })
+            })
+        }) {
             *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
                 &row_heights,
                 &gaps,
@@ -299,60 +299,24 @@ pub(crate) fn render_sidebar(
     let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
     let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
     let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
-        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
-            continue;
-        };
-        let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-        if y.saturating_add(row_height) > body.bottom() {
+    for (index, row) in rows.iter().enumerate().skip(*state.workspace_scroll) {
+        let height = row.height().min(body.height);
+        if y.saturating_add(height) > body.bottom() {
             break;
         }
-        let rect = Rect::new(body.x, y, content_width, row_height);
-        let selected = state.selected_workspace_id.is_some_and(|target| {
-            target.matches(state.active_endpoint_id, &workspace.workspace_id)
-        });
-        let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
-        if selected {
-            buffer.set_style(rect, Style::default().bg(palette.selection_bg));
-        } else if dragged {
-            buffer.set_style(rect, Style::default().bg(palette.surface1));
-        } else if workspace.focused {
-            buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
-        }
-        render_workspace_rows(
+        let rect = Rect::new(body.x, y, content_width, height);
+        render_tree_row(
             buffer,
             rect,
-            status,
-            config.status_indicators,
-            entry,
-            rows,
-            workspace.focused,
-            selected,
-            state.selected_workspace_id.is_some(),
-            dragged,
-            palette,
-        );
-        let group_toggle = render_parent_group_toggle(
-            buffer,
-            rect,
+            row,
             snapshot,
-            entry.index,
-            state.collapsed_groups,
-            palette,
+            &ClientEndpointId::Local,
+            false,
+            config,
+            state,
+            hits,
         );
-        hits.workspaces.push(WorkspaceHit {
-            rect,
-            endpoint_id: ClientEndpointId::Local,
-            workspace_id: workspace.workspace_id.clone(),
-            indented: entry.indented,
-            group_toggle,
-        });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
-        y = y.saturating_add(row_height + gap);
+        y = y.saturating_add(height + gaps[index]);
     }
 
     if show_scrollbar {
@@ -430,17 +394,6 @@ pub(crate) fn render_sidebar(
         }
     }
 
-    super::render_agent_panel(
-        buffer,
-        detail_area,
-        snapshot,
-        config,
-        state.agent_scroll,
-        state.collapsed_agent_groups,
-        state.agent_hover_point,
-        hits,
-    );
-
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),
         area.bottom().saturating_sub(1),
@@ -455,6 +408,288 @@ pub(crate) fn render_sidebar(
         "«",
         Style::default().fg(palette.overlay0),
     );
+}
+
+pub(in crate::client::shell) enum WorkspaceTreeRow {
+    Workspace {
+        entry: WorkspaceEntry,
+        status: crate::api::schema::AgentStatus,
+        tokens: Vec<Vec<crate::ui::ResolvedToken>>,
+        has_agents: bool,
+        collapsed: bool,
+    },
+    Agent {
+        agent: super::agent_sidebar::AgentRow,
+        entry: WorkspaceEntry,
+        last: bool,
+    },
+}
+
+impl WorkspaceTreeRow {
+    pub(in crate::client::shell) fn workspace_index(&self) -> Option<usize> {
+        match self {
+            Self::Workspace { entry, .. } => Some(entry.index),
+            Self::Agent { .. } => None,
+        }
+    }
+
+    pub(in crate::client::shell) fn height(&self) -> u16 {
+        let len = match self {
+            Self::Workspace { tokens, .. } => tokens.len(),
+            Self::Agent { agent, .. } => agent.rows.len(),
+        };
+        len.max(1).min(2) as u16
+    }
+}
+
+pub(in crate::client::shell) fn tree_gaps(rows: &[WorkspaceTreeRow]) -> Vec<u16> {
+    rows.iter()
+        .enumerate()
+        .map(|(index, _)| {
+            u16::from(matches!(
+                rows.get(index + 1),
+                Some(WorkspaceTreeRow::Workspace { .. })
+            ))
+        })
+        .collect()
+}
+
+pub(in crate::client::shell) fn normalize_tree_tokens(
+    rows: &mut Vec<Vec<crate::ui::ResolvedToken>>,
+) {
+    let mut icon = None;
+    rows.truncate(2);
+    for row in rows.iter_mut() {
+        while let Some(index) = row
+            .iter()
+            .position(|token| matches!(token.kind, crate::ui::ResolvedTokenKind::StateIcon))
+        {
+            let token = row.remove(index);
+            if icon.is_none() {
+                icon = Some(token);
+            }
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows[0].insert(
+        0,
+        icon.unwrap_or(crate::ui::ResolvedToken {
+            kind: crate::ui::ResolvedTokenKind::StateIcon,
+            style: Default::default(),
+        }),
+    );
+}
+
+pub(in crate::client::shell) fn workspace_tree_rows(
+    snapshot: &ClientShellSnapshot,
+    endpoint_id: &ClientEndpointId,
+    config: &ClientShellConfig,
+    collapsed_groups: &HashSet<String>,
+    collapsed_agents: &HashSet<(ClientEndpointId, String)>,
+    agents: Vec<super::agent_sidebar::AgentRow>,
+) -> Vec<WorkspaceTreeRow> {
+    let mut by_workspace: HashMap<String, Vec<super::agent_sidebar::AgentRow>> = HashMap::new();
+    for agent in agents {
+        by_workspace
+            .entry(agent.workspace_id.clone())
+            .or_default()
+            .push(agent);
+    }
+    let mut rows = Vec::new();
+    for entry in workspace_entries(snapshot, collapsed_groups) {
+        let workspace = &snapshot.workspaces[entry.index];
+        let status = displayed_workspace_status(snapshot, workspace, collapsed_groups);
+        let mut tokens = workspace_rows(workspace, status, entry.indented, &config.spaces);
+        normalize_tree_tokens(&mut tokens);
+        let agents = by_workspace
+            .remove(&workspace.workspace_id)
+            .unwrap_or_default();
+        let has_agents = !agents.is_empty();
+        let collapsed =
+            collapsed_agents.contains(&(endpoint_id.clone(), workspace.workspace_id.clone()));
+        rows.push(WorkspaceTreeRow::Workspace {
+            entry,
+            status,
+            tokens,
+            has_agents,
+            collapsed,
+        });
+        if collapsed {
+            continue;
+        }
+        let count = agents.len();
+        for (index, mut agent) in agents.into_iter().enumerate() {
+            normalize_tree_tokens(&mut agent.rows);
+            rows.push(WorkspaceTreeRow::Agent {
+                agent,
+                entry,
+                last: index + 1 == count,
+            });
+        }
+    }
+    rows
+}
+
+pub(in crate::client::shell) fn render_tree_row(
+    buffer: &mut Buffer,
+    rect: Rect,
+    row: &WorkspaceTreeRow,
+    snapshot: &ClientShellSnapshot,
+    endpoint_id: &ClientEndpointId,
+    stale: bool,
+    config: &ClientShellConfig,
+    state: &ShellRenderState<'_>,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    let active = endpoint_id == state.active_endpoint_id;
+    let hovered = state
+        .agent_hover_point
+        .is_some_and(|point| super::contains(rect, point));
+    match row {
+        WorkspaceTreeRow::Workspace {
+            entry,
+            status,
+            tokens,
+            has_agents,
+            collapsed,
+        } => {
+            let workspace = &snapshot.workspaces[entry.index];
+            let selected = state
+                .selected_workspace_id
+                .is_some_and(|target| target.matches(endpoint_id, &workspace.workspace_id));
+            let focused = active && workspace.focused;
+            let dragged =
+                active && state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+            if hovered && !selected && !focused && !dragged {
+                buffer.set_style(rect, Style::default().bg(palette.surface1));
+            }
+            render_workspace_rows(
+                buffer,
+                rect,
+                *status,
+                config.status_indicators,
+                entry,
+                tokens,
+                focused,
+                selected,
+                state.selected_workspace_id.is_some(),
+                dragged,
+                *has_agents && !collapsed,
+                palette,
+            );
+            let empty = HashSet::new();
+            let collapsed_groups = if endpoint_id.is_local() {
+                state.collapsed_groups
+            } else {
+                state
+                    .remote_collapsed_groups
+                    .get(endpoint_id)
+                    .unwrap_or(&empty)
+            };
+            let group_toggle = render_parent_group_toggle(
+                buffer,
+                rect,
+                snapshot,
+                entry.index,
+                collapsed_groups,
+                palette,
+            );
+            let arrow_right = rect
+                .right()
+                .saturating_sub(u16::from(group_toggle.is_some()));
+            hits.workspaces.push(WorkspaceHit {
+                rect,
+                endpoint_id: endpoint_id.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+                indented: entry.indented,
+                group_toggle,
+            });
+            if *has_agents {
+                let x = rect.x.saturating_add(if entry.indented { 4 } else { 0 });
+                if x < arrow_right {
+                    let toggle = Rect::new(x, rect.y, 1, 1);
+                    put_text(
+                        buffer,
+                        x,
+                        rect.y,
+                        1,
+                        if *collapsed { "▸" } else { "▾" },
+                        Style::default().fg(palette.overlay0),
+                    );
+                    hits.agent_groups.push((
+                        toggle,
+                        endpoint_id.clone(),
+                        workspace.workspace_id.clone(),
+                    ));
+                }
+            }
+        }
+        WorkspaceTreeRow::Agent { agent, entry, last } => {
+            let focused = active && agent.focused;
+            if focused || hovered {
+                buffer.set_style(
+                    rect,
+                    Style::default().bg(if focused {
+                        palette.active_row_bg
+                    } else {
+                        palette.surface1
+                    }),
+                );
+            }
+            let indent = if entry.indented { 4 } else { 0 };
+            let trunk_x = rect.x.saturating_add(indent + 1);
+            if !last && rect.height > 1 {
+                put_text(
+                    buffer,
+                    trunk_x,
+                    rect.y + 1,
+                    rect.right().saturating_sub(trunk_x),
+                    "│",
+                    Style::default().fg(palette.overlay0),
+                );
+            }
+            if entry.indented && !entry.last_child {
+                for y in rect.y..rect.bottom() {
+                    put_text(
+                        buffer,
+                        rect.x + 1,
+                        y,
+                        rect.width.saturating_sub(1),
+                        "│",
+                        Style::default().fg(palette.overlay0),
+                    );
+                }
+            }
+            let offset = rect.width.min(indent + 3);
+            let content = Rect::new(rect.x + offset, rect.y, rect.width - offset, rect.height);
+            super::agent_sidebar::render_agent_row(buffer, content, agent, focused, config);
+            put_text(
+                buffer,
+                trunk_x,
+                rect.y,
+                rect.right().saturating_sub(trunk_x),
+                if *last { "╰──" } else { "├──" },
+                Style::default().fg(palette.overlay0),
+            );
+            if endpoint_id.is_local() && state.endpoints.len() <= 1 {
+                hits.agents.push((rect, agent.pane_id.clone()));
+            } else {
+                hits.endpoint_agents
+                    .push((rect, endpoint_id.clone(), agent.pane_id.clone()));
+            }
+        }
+    }
+    if stale {
+        buffer.set_style(
+            rect,
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        );
+    }
 }
 
 pub(crate) fn workspace_entries(
@@ -574,6 +809,9 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
     collapsed_groups: &HashSet<String>,
     palette: &Palette,
 ) -> Option<(Rect, String)> {
+    if workspace_rect.is_empty() {
+        return None;
+    }
     let key = parent_group_key(snapshot, workspace_index)?;
     let toggle = Rect::new(
         workspace_rect.right().saturating_sub(1),
@@ -660,11 +898,12 @@ pub(in crate::client::shell) fn render_workspace_rows(
     status: crate::api::schema::AgentStatus,
     indicators: crate::config::StatusIndicatorStyle,
     entry: &WorkspaceEntry,
-    rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    rows: &[Vec<crate::ui::ResolvedToken>],
     focused: bool,
     selected: bool,
     navigating: bool,
     dragged: bool,
+    has_children: bool,
     palette: &Palette,
 ) {
     for (row_index, row) in rows.iter().enumerate() {
@@ -672,32 +911,43 @@ pub(in crate::client::shell) fn render_workspace_rows(
         if y >= area.bottom() {
             break;
         }
-        let mut x = area.x;
+        let indent = if entry.indented { 4 } else { 0 };
         if entry.indented {
             let prefix = if row_index == 0 {
                 if entry.last_child {
-                    "   └─ "
+                    " ╰──"
                 } else {
-                    "   ├─ "
+                    " ├──"
                 }
             } else if entry.last_child {
-                "        "
+                "    "
             } else {
-                "   │    "
+                " │  "
             };
-            x = put_segment(
+            put_text(
                 buffer,
-                x,
+                area.x,
                 y,
-                area.right(),
+                area.width,
                 prefix,
                 Style::default().fg(palette.overlay0),
             );
-        } else if row_index == 0 {
-            x = x.saturating_add(1);
-        } else {
-            x = x.saturating_add(3);
         }
+        if row_index > 0 && has_children {
+            let trunk_x = area.x.saturating_add(indent + 1);
+            put_text(
+                buffer,
+                trunk_x,
+                y,
+                area.right().saturating_sub(trunk_x),
+                "│",
+                Style::default().fg(palette.overlay0),
+            );
+        }
+        let x = area
+            .x
+            .saturating_add(indent + if row_index == 0 { 1 } else { 3 })
+            .min(area.right());
         let highlighted = focused || dragged;
         let workspace_style = Style::default()
             .fg(if highlighted {

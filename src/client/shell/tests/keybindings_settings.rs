@@ -56,8 +56,6 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
     let mut state = ClientShellState::new(config);
     state.sidebar_width = 31;
     state.sidebar_width_manual = true;
-    state.sidebar_section_split = 0.7;
-    state.sidebar_section_split_manual = true;
     state.sidebar_collapsed = true;
     state.sidebar_collapsed_manual = true;
     state.collapsed_groups.insert("repo-two".into());
@@ -80,8 +78,6 @@ fn manual_client_chrome_preferences_round_trip_per_endpoint() {
     let reloaded = ClientShellState::new(reloaded_config);
     assert_eq!(reloaded.sidebar_width, 31);
     assert!(reloaded.sidebar_width_manual);
-    assert_eq!(reloaded.sidebar_section_split, 0.7);
-    assert!(reloaded.sidebar_section_split_manual);
     assert!(reloaded.sidebar_collapsed);
     assert!(reloaded.sidebar_collapsed_manual);
     assert_eq!(

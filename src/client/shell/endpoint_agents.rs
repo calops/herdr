@@ -42,88 +42,6 @@ pub(super) fn render_collapsed(
     }
 }
 
-pub(super) fn render_expanded(
-    buffer: &mut Buffer,
-    area: Rect,
-    agent_view_label: Option<&str>,
-    endpoints: &[ClientShellEndpoint],
-    active_endpoint_id: &ClientEndpointId,
-    config: &ClientShellConfig,
-    agent_scroll: &mut usize,
-    collapsed_agent_groups: &HashSet<(ClientEndpointId, String)>,
-    hover_point: Option<(u16, u16)>,
-    hits: &mut ShellHitMap,
-) {
-    if !super::agent_sidebar::render_agent_panel_header(
-        buffer,
-        area,
-        agent_view_label,
-        config,
-        hits,
-    ) {
-        return;
-    }
-    let (grouped, rows) = expanded_agent_rows(
-        endpoints,
-        active_endpoint_id,
-        config,
-        collapsed_agent_groups,
-    );
-    super::agent_sidebar::render_agent_list(
-        buffer,
-        area,
-        &rows,
-        agent_view_label.map(|_| " no matching agents"),
-        config,
-        agent_scroll,
-        hits,
-        |row| match row {
-            super::agent_sidebar::AgentListRow::Group(_) => 1,
-            super::agent_sidebar::AgentListRow::Agent(row) => row.agent.rows.len(),
-        },
-        |buffer, rect, row, hits| match row {
-            super::agent_sidebar::AgentListRow::Group(group) => {
-                super::agent_sidebar::render_agent_group(
-                    buffer,
-                    rect,
-                    group,
-                    config,
-                    hover_point,
-                    hits,
-                );
-            }
-            super::agent_sidebar::AgentListRow::Agent(row) => {
-                if grouped && row.agent.focused {
-                    buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
-                } else if !row.agent.focused
-                    && hover_point.is_some_and(|point| super::contains(rect, point))
-                {
-                    buffer.set_style(rect, Style::default().bg(config.palette.surface1));
-                }
-                let content = if grouped {
-                    super::agent_sidebar::indented_agent_rect(rect)
-                } else {
-                    rect
-                };
-                super::agent_sidebar::render_agent_row(buffer, content, &row.agent, config);
-                if row.stale {
-                    buffer.set_style(
-                        rect,
-                        Style::default()
-                            .fg(config.palette.overlay0)
-                            .add_modifier(Modifier::DIM),
-                    );
-                }
-                hits.endpoint_agents.push((
-                    rect,
-                    row.endpoint_id.clone(),
-                    row.agent.pane_id.clone(),
-                ));
-            }
-        },
-    );
-}
-
 impl ClientShellState {
     pub(super) fn reveal_endpoint_agent(
         &mut self,
@@ -131,128 +49,121 @@ impl ClientShellState {
         pane_id: &str,
         body_height: u16,
     ) {
-        if let Some(workspace_id) = self
+        let Some(workspace) = self
             .endpoints
             .iter()
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
             .and_then(|endpoint| endpoint.snapshot.as_deref())
             .and_then(|snapshot| {
-                snapshot
+                let agent = snapshot
                     .agents
                     .iter()
-                    .find(|agent| agent.pane_id == pane_id)
+                    .find(|agent| agent.pane_id == pane_id)?;
+                snapshot
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == agent.workspace_id)
             })
-            .map(|agent| agent.workspace_id.clone())
-        {
-            self.collapsed_agent_groups
-                .remove(&(endpoint_id.clone(), workspace_id));
+        else {
+            return;
+        };
+        let workspace_id = workspace.workspace_id.clone();
+        let worktree_key = workspace
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.key.clone());
+        self.collapsed_endpoints.remove(endpoint_id);
+        self.collapsed_agent_groups
+            .remove(&(endpoint_id.clone(), workspace_id));
+        if let Some(key) = worktree_key {
+            if endpoint_id.is_local() {
+                self.collapsed_groups.remove(&key);
+            } else if let Some(groups) = self.remote_collapsed_groups.get_mut(endpoint_id) {
+                groups.remove(&key);
+            }
         }
+        self.reveal_focused_workspace = false;
+        self.reveal_navigation_workspace = false;
         if body_height == 0 {
             return;
         }
-        let (_, rows) = expanded_agent_rows(
+        if self.endpoints.len() <= 1 && endpoint_id.is_local() {
+            let Some(snapshot) = self
+                .endpoints
+                .iter()
+                .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+                .and_then(|endpoint| endpoint.snapshot.as_deref())
+            else {
+                return;
+            };
+            let rows = super::sidebar::workspace_tree_rows(
+                snapshot,
+                endpoint_id,
+                &self.config,
+                &self.collapsed_groups,
+                &self.collapsed_agent_groups,
+                super::agent_sidebar::agent_rows(snapshot, &self.config, None),
+            );
+            let Some(target) = rows.iter().position(|row| {
+                matches!(row, super::sidebar::WorkspaceTreeRow::Agent { agent, .. }
+                    if agent.pane_id == pane_id)
+            }) else {
+                return;
+            };
+            let heights = rows
+                .iter()
+                .map(super::sidebar::WorkspaceTreeRow::height)
+                .collect::<Vec<_>>();
+            let gaps = super::sidebar::tree_gaps(&rows);
+            self.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+                &heights,
+                &gaps,
+                body_height,
+                self.workspace_scroll,
+                target,
+            );
+            return;
+        }
+        let rows = super::endpoint_sidebar::expanded_tree_rows(
             &self.endpoints,
             &self.active_endpoint_id,
             &self.config,
+            &self.collapsed_endpoints,
+            &self.collapsed_groups,
+            &self.remote_collapsed_groups,
             &self.collapsed_agent_groups,
         );
         let Some(target) = rows.iter().position(|row| {
-            matches!(row, super::agent_sidebar::AgentListRow::Agent(row)
-                if &row.endpoint_id == endpoint_id && row.agent.pane_id == pane_id)
+            matches!(row, super::endpoint_sidebar::EndpointTreeRow::Item {
+                endpoint,
+                row: super::sidebar::WorkspaceTreeRow::Agent { agent, .. },
+            } if &self.endpoints[*endpoint].endpoint_id == endpoint_id && agent.pane_id == pane_id)
         }) else {
             return;
         };
         let heights = rows
             .iter()
-            .map(|row| match row {
-                super::agent_sidebar::AgentListRow::Group(_) => 1,
-                super::agent_sidebar::AgentListRow::Agent(row) => {
-                    row.agent.rows.len().max(1).min(u16::MAX as usize) as u16
-                }
-            })
+            .map(super::endpoint_sidebar::EndpointTreeRow::height)
             .collect::<Vec<_>>();
-        let mut gaps = vec![self.config.agents.row_gap; rows.len()];
-        if let Some(last) = gaps.last_mut() {
-            *last = 0;
-        }
-        self.agent_scroll = super::scroll::list_scroll_start_to_reveal(
+        let gaps = super::endpoint_sidebar::expanded_tree_gaps(&rows);
+        self.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
             &heights,
             &gaps,
             body_height,
-            self.agent_scroll,
+            self.workspace_scroll,
             target,
         );
     }
 }
 
-struct EndpointAgentRow {
-    endpoint_id: ClientEndpointId,
-    machine_label: String,
-    stale: bool,
-    agent: super::agent_sidebar::AgentRow,
+pub(super) struct EndpointAgentRow {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) machine_label: String,
+    pub(super) stale: bool,
+    pub(super) agent: super::agent_sidebar::AgentRow,
 }
 
-fn expanded_agent_rows(
-    endpoints: &[ClientShellEndpoint],
-    active_endpoint_id: &ClientEndpointId,
-    config: &ClientShellConfig,
-    collapsed_agent_groups: &HashSet<(ClientEndpointId, String)>,
-) -> (
-    bool,
-    Vec<super::agent_sidebar::AgentListRow<EndpointAgentRow>>,
-) {
-    use super::agent_sidebar::{AgentGroupRow, AgentListRow};
-    let grouped = config.agent_panel_sort == crate::config::AgentPanelSortConfig::Spaces
-        && !endpoints
-            .iter()
-            .find(|endpoint| &endpoint.endpoint_id == active_endpoint_id)
-            .is_some_and(|endpoint| {
-                endpoint
-                    .snapshot
-                    .as_deref()
-                    .is_some_and(|snapshot| snapshot.agent_view_label.is_some())
-                    || matches!(
-                        ClientShellState::endpoint_agent_view(endpoint),
-                        Some(Ok(Some(_)))
-                    )
-            });
-    let rows = agent_rows(endpoints, active_endpoint_id, config);
-    if !grouped {
-        return (false, rows.into_iter().map(AgentListRow::Agent).collect());
-    }
-    let rows = super::agent_sidebar::group_agent_rows(
-        rows,
-        |row| (&row.endpoint_id, row.agent.workspace_id.as_str()),
-        |row| {
-            let endpoint = endpoints
-                .iter()
-                .find(|endpoint| endpoint.endpoint_id == row.endpoint_id)
-                .expect("agent row has an endpoint");
-            let workspace = endpoint
-                .snapshot
-                .as_deref()
-                .and_then(|snapshot| {
-                    snapshot
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.workspace_id == row.agent.workspace_id)
-                })
-                .expect("agent row has a workspace");
-            AgentGroupRow {
-                endpoint_id: row.endpoint_id.clone(),
-                workspace_id: workspace.workspace_id.clone(),
-                label: format!("{} · {}", endpoint.label, workspace.label),
-                status: workspace.agent_status,
-                collapsed: collapsed_agent_groups
-                    .contains(&(row.endpoint_id.clone(), workspace.workspace_id.clone())),
-                stale: row.stale,
-            }
-        },
-    );
-    (true, rows)
-}
-
-fn agent_rows(
+pub(super) fn agent_rows(
     endpoints: &[ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,

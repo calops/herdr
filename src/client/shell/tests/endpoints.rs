@@ -855,9 +855,9 @@ fn state_with_scrollable_agents() -> (ClientShellState, ClientEndpointId) {
         state.set_endpoint_snapshot(&endpoint_id, projection);
     }
     state.compose(100, 28).unwrap();
-    state.agent_scroll = 6;
+    state.workspace_scroll = 6;
     state.compose(100, 28).unwrap();
-    assert_eq!(state.agent_scroll, 6);
+    assert_eq!(state.workspace_scroll, 6);
     (state, remote)
 }
 
@@ -876,10 +876,10 @@ fn agent_navigation_reveals_offscreen_targets() {
             KeybindAction::PreviousAgent => (remote, "pane_8"),
             _ => (ClientEndpointId::Local, "pane_1"),
         };
-        state.agent_scroll = if action == KeybindAction::PreviousAgent {
+        state.workspace_scroll = if action == KeybindAction::PreviousAgent {
             0
         } else {
-            state.hits.agent_max_scroll
+            state.hits.workspace_max_scroll
         };
         state.compose(100, 28).unwrap();
         assert!(!state
@@ -967,11 +967,11 @@ fn agent_navigation_reveals_target_using_destination_sort() {
 fn agent_navigation_reveal_is_cancelled_by_another_selection() {
     for select_pane in [false, true] {
         let (mut state, remote) = state_with_scrollable_agents();
-        let scroll = state.agent_scroll;
+        let scroll = state.workspace_scroll;
         let mut outcome = ClientShellInput::default();
         assert!(state
             .handle_endpoint_navigation(crate::input::KeybindAction::PreviousAgent, &mut outcome,));
-        assert_eq!(state.agent_scroll, scroll);
+        assert_eq!(state.workspace_scroll, scroll);
         if select_pane {
             assert!(state.focus_or_activate(
                 remote.clone(),
@@ -983,7 +983,7 @@ fn agent_navigation_reveal_is_cancelled_by_another_selection() {
         }
         assert!(state.activate_endpoint_projection(&remote));
         state.compose(100, 28).unwrap();
-        assert_eq!(state.agent_scroll, scroll);
+        assert_eq!(state.workspace_scroll, scroll);
     }
 }
 
@@ -1000,13 +1000,13 @@ fn agent_navigation_keeps_scroll_when_target_is_visible() {
         .iter()
         .position(|target| target.endpoint_id == endpoint_id && target.pane_id == pane_id)
         .unwrap();
-    let scroll = state.agent_scroll;
+    let scroll = state.workspace_scroll;
     assert!(state.handle_endpoint_navigation(
         crate::input::KeybindAction::FocusAgent(index),
         &mut ClientShellInput::default(),
     ));
     state.compose(100, 28).unwrap();
-    assert_eq!(state.agent_scroll, scroll);
+    assert_eq!(state.workspace_scroll, scroll);
 }
 
 #[test]
@@ -1035,8 +1035,7 @@ fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
         state.workspace_scroll = 3;
         state.tab_scroll = 2;
         assert!(state.activate_endpoint_projection(&endpoint_id));
-        assert_eq!(state.agent_scroll, 6);
-        assert_eq!(state.workspace_scroll, 0);
+        assert_eq!(state.workspace_scroll, 6);
         assert_eq!(state.tab_scroll, 0);
         assert!(state.pane_surface.is_none());
 
@@ -1044,7 +1043,7 @@ fn switching_machines_preserves_aggregate_agent_scroll_and_visible_rows() {
         next_surface.boot_id = state.endpoint_boot_id(&endpoint_id).unwrap().into();
         state.set_pane_surface(next_surface);
         state.compose(100, 28).unwrap();
-        assert_eq!(state.agent_scroll, 6);
+        assert_eq!(state.workspace_scroll, 6);
         assert_eq!(state.hits.endpoint_agents, visible);
     }
 }
@@ -1098,8 +1097,8 @@ fn aggregate_agent_scroll_still_clamps_when_rows_shrink_on_activation() {
     }
     assert!(state.activate_endpoint_projection(&remote));
     state.compose(100, 28).unwrap();
-    assert_eq!(state.agent_scroll, 0);
-    assert_eq!(state.hits.agent_max_scroll, 0);
+    assert_eq!(state.workspace_scroll, 0);
+    assert_eq!(state.hits.workspace_max_scroll, 0);
     assert_eq!(state.hits.endpoint_agents.len(), 2);
 }
 
@@ -1110,7 +1109,7 @@ fn same_machine_reboot_still_resets_agent_scroll() {
     projection.boot_id = "restarted-local".into();
     state.cache_endpoint_snapshot(&ClientEndpointId::Local, projection);
     assert!(state.activate_endpoint_projection(&ClientEndpointId::Local));
-    assert_eq!(state.agent_scroll, 0);
+    assert_eq!(state.workspace_scroll, 0);
 }
 
 #[test]
@@ -1762,20 +1761,6 @@ fn aggregate_agents_use_configured_rows_machine_token_and_status_colors() {
         .join("\n");
     assert!(text.contains("○ Local · local agent"), "frame: {text}");
     assert!(text.contains("× Build · remote agent"), "frame: {text}");
-    assert!(text.contains("grouped"), "frame: {text}");
-    let toggle = state.hits.agent_sort_toggle;
-    assert!(!toggle.is_empty());
-    let click = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: toggle.x,
-        row: toggle.y,
-        modifiers: KeyModifiers::empty(),
-    })]);
-    assert_eq!(
-        state.config.agent_panel_sort,
-        crate::config::AgentPanelSortConfig::Priority
-    );
-    assert!(click.actions.is_empty());
 
     let buffer = frame
         .to_ratatui_buffer()
@@ -2608,7 +2593,7 @@ fn reconnect_same_endpoint_accepts_new_generation_surface_revision() {
         previous_surface.projection_revision += 1;
         state.set_pane_surface(previous_surface);
         assert!(state.pending_pane_surface.is_some());
-        state.agent_scroll = 7;
+        state.workspace_scroll = 7;
 
         state.mark_endpoint_disconnected(&endpoint_id);
         let mut reconnected = snapshot();
@@ -2635,7 +2620,7 @@ fn reconnect_same_endpoint_accepts_new_generation_surface_revision() {
         assert_eq!(state.pane_surface.as_ref().unwrap().projection_revision, 1);
         assert_eq!(state.pane_surface.as_ref().unwrap().surface_revision, 1);
         assert!(state.pending_pane_surface.is_none());
-        assert_eq!(state.agent_scroll, 7);
+        assert_eq!(state.workspace_scroll, 7);
         assert!(state.compose(106, 20).is_some());
     }
 }

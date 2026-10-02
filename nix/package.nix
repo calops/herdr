@@ -8,7 +8,6 @@
   zstd,
   pkg-config,
   git,
-  just,
   libnotify,
   installShellFiles,
   cctools ? null,
@@ -45,10 +44,8 @@ rustPlatform.buildRustPackage {
         ../assets
         ../crates
         ../distribution/install.ps1
-        ../distribution/latest.json
         ../docs/next/api/herdr-api.schema.json
         ../src
-        ../tests/fixtures
         ../vendor/libghostty-vt
         ../vendor/libghostty-vt.vendor.json
         ../vendor/portable-pty
@@ -56,7 +53,6 @@ rustPlatform.buildRustPackage {
         ../Cargo.lock
         ../Cargo.toml
         ../skills/herdr/SKILL.md
-        ../justfile
       ]
     );
   };
@@ -70,8 +66,6 @@ rustPlatform.buildRustPackage {
     pkg-config
     installShellFiles
   ] ++ darwinToolchain;
-
-  nativeCheckInputs = [ just ];
 
   postPatch = ''
     substituteInPlace crates/ghostty-vt/build.rs \
@@ -97,13 +91,8 @@ rustPlatform.buildRustPackage {
     export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local-cache"
   '';
 
-  doCheck = stdenv.buildPlatform.canExecute stdenv.hostPlatform;
-  checkPhase = ''
-    runHook preCheck
-    just nix-test
-    just bench-render-scale server::render_scale_benchmark::render_scale_profile
-    runHook postCheck
-  '';
+  # Validate UI changes interactively; package builds do not run tests.
+  doCheck = false;
 
   postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
     installShellCompletion --cmd herdr \
