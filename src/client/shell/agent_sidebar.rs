@@ -12,9 +12,97 @@ use super::*;
 
 pub(super) struct AgentRow {
     pub(super) pane_id: String,
+    pub(super) workspace_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+}
+
+pub(super) struct AgentGroupRow {
+    pub(super) endpoint_id: ClientEndpointId,
+    pub(super) workspace_id: String,
+    pub(super) label: String,
+    pub(super) status: crate::api::schema::AgentStatus,
+    pub(super) collapsed: bool,
+    pub(super) stale: bool,
+}
+
+pub(super) enum AgentListRow<T> {
+    Group(AgentGroupRow),
+    Agent(T),
+}
+
+pub(super) fn group_agent_rows<T>(
+    rows: Vec<T>,
+    key: impl Fn(&T) -> (&ClientEndpointId, &str),
+    header: impl Fn(&T) -> AgentGroupRow,
+) -> Vec<AgentListRow<T>> {
+    let mut groups: Vec<(AgentGroupRow, Vec<T>)> = Vec::new();
+    for row in rows {
+        let (endpoint_id, workspace_id) = key(&row);
+        let index = groups.iter().position(|(group, _)| {
+            &group.endpoint_id == endpoint_id && group.workspace_id == workspace_id
+        });
+        if let Some(index) = index {
+            groups[index].1.push(row);
+        } else {
+            groups.push((header(&row), vec![row]));
+        }
+    }
+    let mut entries = Vec::with_capacity(groups.iter().map(|(_, agents)| 1 + agents.len()).sum());
+    for (group, agents) in groups {
+        let collapsed = group.collapsed;
+        entries.push(AgentListRow::Group(group));
+        if !collapsed {
+            entries.extend(agents.into_iter().map(AgentListRow::Agent));
+        }
+    }
+    entries
+}
+
+pub(super) fn render_agent_group(
+    buffer: &mut Buffer,
+    rect: Rect,
+    group: &AgentGroupRow,
+    config: &ClientShellConfig,
+    hover_point: Option<(u16, u16)>,
+    hits: &mut ShellHitMap,
+) {
+    let palette = &config.palette;
+    if hover_point.is_some_and(|point| super::contains(rect, point)) {
+        buffer.set_style(rect, Style::default().bg(palette.surface1));
+    }
+    let color = if group.stale {
+        palette.overlay0
+    } else {
+        status_color(group.status, palette)
+    };
+    let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let style = if group.stale {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style
+    };
+    let marker = if group.collapsed { "▸" } else { "▾" };
+    let spans = vec![
+        ratatui::text::Span::styled(format!("{marker} "), Style::default().fg(palette.overlay0)),
+        ratatui::text::Span::styled(
+            format!("{} ", status_icon(group.status, config.status_indicators)),
+            style,
+        ),
+        ratatui::text::Span::styled(
+            crate::ui::truncate_end(&group.label, rect.width.saturating_sub(4) as usize),
+            style,
+        ),
+    ];
+    Paragraph::new(Line::from(spans)).render(rect, buffer);
+    hits.agent_groups
+        .push((rect, group.endpoint_id.clone(), group.workspace_id.clone()));
+}
+
+pub(super) fn indented_agent_rect(rect: Rect) -> Rect {
+    let indent = rect.width.min(2);
+    Rect::new(rect.x + indent, rect.y, rect.width - indent, rect.height)
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -55,6 +143,8 @@ pub(super) fn render_agent_panel(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    collapsed_agent_groups: &HashSet<(ClientEndpointId, String)>,
+    hover_point: Option<(u16, u16)>,
     hits: &mut ShellHitMap,
 ) {
     if !render_agent_panel_header(
@@ -67,7 +157,33 @@ pub(super) fn render_agent_panel(
         return;
     }
 
+    let grouped = config.agent_panel_sort == crate::config::AgentPanelSortConfig::Spaces
+        && snapshot.agent_view_label.is_none();
     let rows = agent_rows(snapshot, config, None);
+    let rows = if grouped {
+        group_agent_rows(
+            rows,
+            |row| (&ClientEndpointId::Local, row.workspace_id.as_str()),
+            |row| {
+                let workspace = snapshot
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == row.workspace_id)
+                    .expect("agent row has a workspace");
+                AgentGroupRow {
+                    endpoint_id: ClientEndpointId::Local,
+                    workspace_id: workspace.workspace_id.clone(),
+                    label: workspace.label.clone(),
+                    status: workspace.agent_status,
+                    collapsed: collapsed_agent_groups
+                        .contains(&(ClientEndpointId::Local, workspace.workspace_id.clone())),
+                    stale: false,
+                }
+            },
+        )
+    } else {
+        rows.into_iter().map(AgentListRow::Agent).collect()
+    };
     render_agent_list(
         buffer,
         area,
@@ -79,10 +195,30 @@ pub(super) fn render_agent_panel(
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
-        |buffer, rect, row, hits| {
-            hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+        |row| match row {
+            AgentListRow::Group(_) => 1,
+            AgentListRow::Agent(row) => row.rows.len(),
+        },
+        |buffer, rect, row, hits| match row {
+            AgentListRow::Group(group) => {
+                render_agent_group(buffer, rect, group, config, hover_point, hits);
+            }
+            AgentListRow::Agent(row) => {
+                if grouped && row.focused {
+                    buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
+                } else if !row.focused
+                    && hover_point.is_some_and(|point| super::contains(rect, point))
+                {
+                    buffer.set_style(rect, Style::default().bg(config.palette.surface1));
+                }
+                let content = if grouped {
+                    indented_agent_rect(rect)
+                } else {
+                    rect
+                };
+                hits.agents.push((rect, row.pane_id.clone()));
+                render_agent_row(buffer, content, row, config);
+            }
         },
     );
 }
@@ -312,6 +448,7 @@ pub(super) fn agent_row(
     );
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
+        workspace_id: agent.workspace_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
         rows,

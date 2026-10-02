@@ -50,6 +50,8 @@ pub(super) fn render_expanded(
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
     agent_scroll: &mut usize,
+    collapsed_agent_groups: &HashSet<(ClientEndpointId, String)>,
+    hover_point: Option<(u16, u16)>,
     hits: &mut ShellHitMap,
 ) {
     if !super::agent_sidebar::render_agent_panel_header(
@@ -61,7 +63,12 @@ pub(super) fn render_expanded(
     ) {
         return;
     }
-    let rows = agent_rows(endpoints, active_endpoint_id, config);
+    let (grouped, rows) = expanded_agent_rows(
+        endpoints,
+        active_endpoint_id,
+        config,
+        collapsed_agent_groups,
+    );
     super::agent_sidebar::render_agent_list(
         buffer,
         area,
@@ -70,19 +77,49 @@ pub(super) fn render_expanded(
         config,
         agent_scroll,
         hits,
-        |row| row.agent.rows.len(),
-        |buffer, rect, row, hits| {
-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
-            if row.stale {
-                buffer.set_style(
+        |row| match row {
+            super::agent_sidebar::AgentListRow::Group(_) => 1,
+            super::agent_sidebar::AgentListRow::Agent(row) => row.agent.rows.len(),
+        },
+        |buffer, rect, row, hits| match row {
+            super::agent_sidebar::AgentListRow::Group(group) => {
+                super::agent_sidebar::render_agent_group(
+                    buffer,
                     rect,
-                    Style::default()
-                        .fg(config.palette.overlay0)
-                        .add_modifier(Modifier::DIM),
+                    group,
+                    config,
+                    hover_point,
+                    hits,
                 );
             }
-            hits.endpoint_agents
-                .push((rect, row.endpoint_id.clone(), row.agent.pane_id.clone()));
+            super::agent_sidebar::AgentListRow::Agent(row) => {
+                if grouped && row.agent.focused {
+                    buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
+                } else if !row.agent.focused
+                    && hover_point.is_some_and(|point| super::contains(rect, point))
+                {
+                    buffer.set_style(rect, Style::default().bg(config.palette.surface1));
+                }
+                let content = if grouped {
+                    super::agent_sidebar::indented_agent_rect(rect)
+                } else {
+                    rect
+                };
+                super::agent_sidebar::render_agent_row(buffer, content, &row.agent, config);
+                if row.stale {
+                    buffer.set_style(
+                        rect,
+                        Style::default()
+                            .fg(config.palette.overlay0)
+                            .add_modifier(Modifier::DIM),
+                    );
+                }
+                hits.endpoint_agents.push((
+                    rect,
+                    row.endpoint_id.clone(),
+                    row.agent.pane_id.clone(),
+                ));
+            }
         },
     );
 }
@@ -94,19 +131,45 @@ impl ClientShellState {
         pane_id: &str,
         body_height: u16,
     ) {
+        if let Some(workspace_id) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+            .and_then(|endpoint| endpoint.snapshot.as_deref())
+            .and_then(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane_id)
+            })
+            .map(|agent| agent.workspace_id.clone())
+        {
+            self.collapsed_agent_groups
+                .remove(&(endpoint_id.clone(), workspace_id));
+        }
         if body_height == 0 {
             return;
         }
-        let rows = agent_rows(&self.endpoints, &self.active_endpoint_id, &self.config);
-        let Some(target) = rows
-            .iter()
-            .position(|row| &row.endpoint_id == endpoint_id && row.agent.pane_id == pane_id)
-        else {
+        let (_, rows) = expanded_agent_rows(
+            &self.endpoints,
+            &self.active_endpoint_id,
+            &self.config,
+            &self.collapsed_agent_groups,
+        );
+        let Some(target) = rows.iter().position(|row| {
+            matches!(row, super::agent_sidebar::AgentListRow::Agent(row)
+                if &row.endpoint_id == endpoint_id && row.agent.pane_id == pane_id)
+        }) else {
             return;
         };
         let heights = rows
             .iter()
-            .map(|row| row.agent.rows.len().max(1).min(u16::MAX as usize) as u16)
+            .map(|row| match row {
+                super::agent_sidebar::AgentListRow::Group(_) => 1,
+                super::agent_sidebar::AgentListRow::Agent(row) => {
+                    row.agent.rows.len().max(1).min(u16::MAX as usize) as u16
+                }
+            })
             .collect::<Vec<_>>();
         let mut gaps = vec![self.config.agents.row_gap; rows.len()];
         if let Some(last) = gaps.last_mut() {
@@ -127,6 +190,66 @@ struct EndpointAgentRow {
     machine_label: String,
     stale: bool,
     agent: super::agent_sidebar::AgentRow,
+}
+
+fn expanded_agent_rows(
+    endpoints: &[ClientShellEndpoint],
+    active_endpoint_id: &ClientEndpointId,
+    config: &ClientShellConfig,
+    collapsed_agent_groups: &HashSet<(ClientEndpointId, String)>,
+) -> (
+    bool,
+    Vec<super::agent_sidebar::AgentListRow<EndpointAgentRow>>,
+) {
+    use super::agent_sidebar::{AgentGroupRow, AgentListRow};
+    let grouped = config.agent_panel_sort == crate::config::AgentPanelSortConfig::Spaces
+        && !endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == active_endpoint_id)
+            .is_some_and(|endpoint| {
+                endpoint
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|snapshot| snapshot.agent_view_label.is_some())
+                    || matches!(
+                        ClientShellState::endpoint_agent_view(endpoint),
+                        Some(Ok(Some(_)))
+                    )
+            });
+    let rows = agent_rows(endpoints, active_endpoint_id, config);
+    if !grouped {
+        return (false, rows.into_iter().map(AgentListRow::Agent).collect());
+    }
+    let rows = super::agent_sidebar::group_agent_rows(
+        rows,
+        |row| (&row.endpoint_id, row.agent.workspace_id.as_str()),
+        |row| {
+            let endpoint = endpoints
+                .iter()
+                .find(|endpoint| endpoint.endpoint_id == row.endpoint_id)
+                .expect("agent row has an endpoint");
+            let workspace = endpoint
+                .snapshot
+                .as_deref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.workspace_id == row.agent.workspace_id)
+                })
+                .expect("agent row has a workspace");
+            AgentGroupRow {
+                endpoint_id: row.endpoint_id.clone(),
+                workspace_id: workspace.workspace_id.clone(),
+                label: format!("{} · {}", endpoint.label, workspace.label),
+                status: workspace.agent_status,
+                collapsed: collapsed_agent_groups
+                    .contains(&(row.endpoint_id.clone(), workspace.workspace_id.clone())),
+                stale: row.stale,
+            }
+        },
+    );
+    (true, rows)
 }
 
 fn agent_rows(

@@ -73,6 +73,719 @@ fn state_with_remote() -> (ClientShellState, ClientEndpointId) {
     (state, endpoint_id)
 }
 
+fn workspace_agent_group_snapshot() -> ClientShellSnapshot {
+    let mut projected = snapshot();
+    projected.workspaces[0].label = "alpha".into();
+    projected.workspaces[0].agent_status = AgentStatus::Blocked;
+    projected.workspaces.push(ClientShellWorkspace {
+        workspace_id: "ws_2".into(),
+        active_tab_id: "tab_2".into(),
+        number: 2,
+        label: "beta".into(),
+        focused: false,
+        agent_status: AgentStatus::Working,
+        ..projected.workspaces[0].clone()
+    });
+    projected.tabs.push(ClientShellTab {
+        tab_id: "tab_2".into(),
+        workspace_id: "ws_2".into(),
+        focused: false,
+        agent_status: AgentStatus::Working,
+        ..projected.tabs[0].clone()
+    });
+    projected.agents = vec![
+        agent("alpha one", AgentStatus::Idle, 1),
+        ClientShellAgent {
+            pane_id: "pane_b".into(),
+            workspace_id: "ws_2".into(),
+            tab_id: "tab_2".into(),
+            focused: false,
+            ..agent("beta one", AgentStatus::Working, 2)
+        },
+        ClientShellAgent {
+            pane_id: "pane_2".into(),
+            focused: false,
+            ..agent("alpha two", AgentStatus::Blocked, 3)
+        },
+    ];
+    projected.panes = projected
+        .agents
+        .iter()
+        .map(|agent| ClientShellPane {
+            pane_id: agent.pane_id.clone(),
+            workspace_id: agent.workspace_id.clone(),
+            tab_id: agent.tab_id.clone(),
+            focused: agent.focused,
+            ..projected.panes[0].clone()
+        })
+        .collect();
+    projected
+}
+
+fn state_with_workspace_agent_groups() -> ClientShellState {
+    use crate::config::{AgentPanelSortConfig, AgentSidebarToken, StatusIndicatorStyle};
+
+    let mut config = Config::default();
+    config.ui.agent_panel_sort = AgentPanelSortConfig::Spaces;
+    config.ui.status_indicators = StatusIndicatorStyle::Symbols;
+    config.ui.sidebar.agents.rows = vec![vec![AgentSidebarToken::Agent]];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(workspace_agent_group_snapshot()));
+    state.set_pane_surface(surface());
+    state
+}
+
+fn agent_group_rect(
+    state: &ClientShellState,
+    endpoint_id: &ClientEndpointId,
+    workspace_id: &str,
+) -> Rect {
+    state
+        .hits
+        .agent_groups
+        .iter()
+        .find(|(_, endpoint, workspace)| endpoint == endpoint_id && workspace == workspace_id)
+        .expect("workspace agent group header")
+        .0
+}
+
+fn assert_agent_group_status(
+    frame: &FrameData,
+    rect: Rect,
+    label: &str,
+    icon: &str,
+    color: ratatui::style::Color,
+) {
+    cell_symbol_position(frame, rect, label);
+    let (x, y) = cell_symbol_position(frame, rect, icon);
+    let cell = &frame.cells[usize::from(y) * usize::from(frame.width) + usize::from(x)];
+    assert_eq!(cell.symbol, icon);
+    assert_eq!(cell.fg, crate::protocol::color_to_u32(color));
+}
+
+fn click_agent_group_header(state: &mut ClientShellState, rect: Rect) {
+    let focused = state
+        .snapshot
+        .as_ref()
+        .expect("snapshot")
+        .focused_workspace_id
+        .clone();
+    let endpoint = state.active_endpoint_id.clone();
+    let mut repaint = false;
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+            kind,
+            column: rect.right() - 1,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+        assert!(
+            outcome.actions.is_empty(),
+            "group clicks must not focus a pane or workspace"
+        );
+        assert!(
+            outcome.requests.is_empty(),
+            "group clicks must not send pane input"
+        );
+        repaint |= outcome.repaint;
+    }
+    assert!(repaint);
+    assert_eq!(state.active_endpoint_id, endpoint);
+    assert_eq!(
+        state
+            .snapshot
+            .as_ref()
+            .expect("snapshot")
+            .focused_workspace_id,
+        focused
+    );
+}
+
+#[test]
+fn agent_workspace_groups_highlight_focused_rows_across_the_full_width() {
+    use ratatui::style::Color;
+
+    for (aggregate, focus_remote) in [(false, false), (true, false), (true, true)] {
+        let mut state = state_with_workspace_agent_groups();
+        state.config.palette.active_row_bg = Color::Rgb(49, 50, 68);
+        state.config.palette.sidebar_bg = Color::Rgb(24, 24, 37);
+        let focused_endpoint = if aggregate {
+            let remote = add_remote_agent_group(&mut state);
+            if focus_remote {
+                assert!(state.activate_endpoint_projection(&remote));
+                remote
+            } else {
+                ClientEndpointId::Local
+            }
+        } else {
+            ClientEndpointId::Local
+        };
+        let frame = state.compose(120, 48).expect("focused grouped agent");
+        let buffer = frame.to_ratatui_buffer().expect("sidebar buffer");
+        let rows = if aggregate {
+            state
+                .hits
+                .endpoint_agents
+                .iter()
+                .map(|(rect, endpoint, pane)| (*rect, endpoint.clone(), pane.as_str()))
+                .collect::<Vec<_>>()
+        } else {
+            state
+                .hits
+                .agents
+                .iter()
+                .map(|(rect, pane)| (*rect, ClientEndpointId::Local, pane.as_str()))
+                .collect::<Vec<_>>()
+        };
+        let focused_row = rows
+            .iter()
+            .find(|(_, endpoint, pane)| endpoint == &focused_endpoint && *pane == "pane_1")
+            .expect("focused agent row")
+            .0;
+        for (rect, endpoint, pane) in rows {
+            let expected = if endpoint == focused_endpoint && pane == "pane_1" {
+                state.config.palette.active_row_bg
+            } else {
+                state.config.palette.sidebar_bg
+            };
+            for y in rect.y..rect.bottom() {
+                for x in rect.x..rect.right() {
+                    assert_eq!(
+                        buffer[(x, y)].bg,
+                        expected,
+                        "row {endpoint:?}/{pane} background at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            buffer[(focused_row.right(), focused_row.y)].symbol(),
+            "│",
+            "selection must not paint over the sidebar separator",
+        );
+    }
+}
+
+fn agent_hover_test_state(aggregate: bool) -> (ClientShellState, ClientEndpointId) {
+    use ratatui::style::Color;
+
+    let mut state = state_with_workspace_agent_groups();
+    state.config.palette.sidebar_bg = Color::Rgb(10, 20, 30);
+    state.config.palette.surface1 = Color::Rgb(40, 50, 60);
+    state.config.palette.active_row_bg = Color::Rgb(70, 80, 90);
+    let mut pane_surface = surface();
+    pane_surface.panes[0].mouse_reporting = true;
+    state.set_pane_surface(pane_surface);
+    let endpoint = if aggregate {
+        add_remote_agent_group(&mut state)
+    } else {
+        ClientEndpointId::Local
+    };
+    (state, endpoint)
+}
+
+fn agent_hover_row(state: &ClientShellState, endpoint: &ClientEndpointId, pane_id: &str) -> Rect {
+    if state.hits.endpoint_agents.is_empty() {
+        assert_eq!(endpoint, &ClientEndpointId::Local);
+        state
+            .hits
+            .agents
+            .iter()
+            .find(|(_, pane)| pane == pane_id)
+            .expect("local agent row")
+            .0
+    } else {
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .find(|(_, candidate, pane)| candidate == endpoint && pane == pane_id)
+            .expect("aggregate agent row")
+            .0
+    }
+}
+
+fn move_over_agent_sidebar(state: &mut ClientShellState, x: u16, y: u16) -> bool {
+    let endpoint = state.active_endpoint_id.clone();
+    let snapshot = state.snapshot.as_ref().expect("snapshot");
+    let focus = (
+        snapshot.focused_workspace_id.clone(),
+        snapshot.focused_tab_id.clone(),
+        snapshot.focused_pane_id.clone(),
+    );
+    let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::empty(),
+    })]);
+    assert!(
+        outcome.requests.is_empty(),
+        "sidebar motion must not send pane input"
+    );
+    assert!(
+        outcome.actions.is_empty(),
+        "sidebar motion must not request focus"
+    );
+    assert_eq!(state.active_endpoint_id, endpoint);
+    let snapshot = state.snapshot.as_ref().expect("snapshot");
+    assert_eq!(
+        (
+            &snapshot.focused_workspace_id,
+            &snapshot.focused_tab_id,
+            &snapshot.focused_pane_id,
+        ),
+        (&focus.0, &focus.1, &focus.2),
+        "sidebar motion must not change selection"
+    );
+    outcome.repaint
+}
+
+fn assert_agent_hover_backgrounds(
+    state: &ClientShellState,
+    frame: &FrameData,
+    hovered: Option<Rect>,
+) {
+    let buffer = frame.to_ratatui_buffer().expect("sidebar buffer");
+    let assert_row = |rect: Rect, focused: bool| {
+        let expected = if focused {
+            state.config.palette.active_row_bg
+        } else if hovered == Some(rect) {
+            state.config.palette.surface1
+        } else {
+            state.config.palette.sidebar_bg
+        };
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    expected,
+                    "full-width background, including indentation, at ({x}, {y}) in {rect:?}"
+                );
+            }
+        }
+        assert_eq!(buffer[(rect.right(), rect.y)].symbol(), "│");
+        assert_ne!(
+            buffer[(rect.right(), rect.y)].bg,
+            state.config.palette.surface1,
+            "hover must stop before the sidebar separator"
+        );
+    };
+    for (rect, pane) in &state.hits.agents {
+        assert_row(*rect, pane == "pane_1");
+    }
+    for (rect, endpoint, pane) in &state.hits.endpoint_agents {
+        assert_row(
+            *rect,
+            endpoint == &state.active_endpoint_id && pane == "pane_1",
+        );
+    }
+    for (rect, _, _) in &state.hits.agent_groups {
+        assert_row(*rect, false);
+    }
+}
+
+#[test]
+fn agent_sidebar_hover_paints_rows_and_headers_without_changing_focus() {
+    for (aggregate, hover_remote) in [(false, false), (true, false), (true, true)] {
+        let (mut state, remote) = agent_hover_test_state(aggregate);
+        let endpoint = if hover_remote {
+            remote
+        } else {
+            ClientEndpointId::Local
+        };
+        let pane = if hover_remote { "pane_1" } else { "pane_2" };
+        let initial = state.compose(120, 48).expect("grouped agents");
+        assert_agent_hover_backgrounds(&state, &initial, None);
+        let row = agent_hover_row(&state, &endpoint, pane);
+        let header = agent_group_rect(&state, &endpoint, "ws_1");
+        let focused = agent_hover_row(&state, &ClientEndpointId::Local, "pane_1");
+
+        assert!(move_over_agent_sidebar(&mut state, row.x, row.y));
+        let hovered = state.compose(120, 48).expect("hovered child indentation");
+        assert_agent_hover_backgrounds(&state, &hovered, Some(row));
+        assert!(!move_over_agent_sidebar(&mut state, row.right() - 1, row.y));
+        let moved = state
+            .compose(120, 48)
+            .expect("hovered child trailing space");
+        assert_agent_hover_backgrounds(&state, &moved, Some(row));
+
+        assert!(move_over_agent_sidebar(&mut state, row.right(), row.y));
+        let left = state.compose(120, 48).expect("hover cleared at separator");
+        assert_agent_hover_backgrounds(&state, &left, None);
+        assert!(!move_over_agent_sidebar(&mut state, row.right(), row.y));
+
+        assert!(move_over_agent_sidebar(&mut state, header.x, header.y));
+        let grouped = state.compose(120, 48).expect("hovered workspace header");
+        assert_agent_hover_backgrounds(&state, &grouped, Some(header));
+        assert!(!move_over_agent_sidebar(
+            &mut state,
+            header.right() - 1,
+            header.y
+        ));
+        let moved = state
+            .compose(120, 48)
+            .expect("hovered header trailing space");
+        assert_agent_hover_backgrounds(&state, &moved, Some(header));
+
+        assert!(move_over_agent_sidebar(&mut state, focused.x, focused.y));
+        let selected = state.compose(120, 48).expect("hovered focused agent");
+        assert_agent_hover_backgrounds(&state, &selected, Some(focused));
+        assert!(move_over_agent_sidebar(
+            &mut state,
+            focused.right(),
+            focused.y
+        ));
+        let left = state.compose(120, 48).expect("focused background retained");
+        assert_agent_hover_backgrounds(&state, &left, None);
+    }
+}
+
+#[test]
+fn agent_sidebar_hover_respects_mouse_capture_and_outer_focus() {
+    for aggregate in [false, true] {
+        let (mut state, endpoint) = agent_hover_test_state(aggregate);
+        state.compose(120, 48).expect("enabled sidebar geometry");
+        let pane = if aggregate { "pane_1" } else { "pane_2" };
+        let row = agent_hover_row(&state, &endpoint, pane);
+        let header = agent_group_rect(&state, &endpoint, "ws_1");
+        state.config.mouse_capture = false;
+        for rect in [row, header] {
+            assert!(!move_over_agent_sidebar(&mut state, rect.x, rect.y));
+            let disabled = state.compose(120, 48).expect("disabled hover");
+            let buffer = disabled
+                .to_ratatui_buffer()
+                .expect("disabled sidebar buffer");
+            for area in [row, header] {
+                for y in area.y..area.bottom() {
+                    for x in area.x..area.right() {
+                        assert_eq!(buffer[(x, y)].bg, state.config.palette.sidebar_bg);
+                    }
+                }
+            }
+        }
+
+        state.config.mouse_capture = true;
+        state.compose(120, 48).expect("restored mouse hit map");
+        assert!(move_over_agent_sidebar(&mut state, row.x, row.y));
+        let hovered = state.compose(120, 48).expect("enabled hover");
+        assert_agent_hover_backgrounds(&state, &hovered, Some(row));
+        assert!(
+            state
+                .handle_raw_events(vec![RawInputEvent::OuterFocusLost])
+                .repaint
+        );
+        let unfocused = state.compose(120, 48).expect("unfocused sidebar");
+        assert_agent_hover_backgrounds(&state, &unfocused, None);
+        for rect in [row, header] {
+            assert!(!move_over_agent_sidebar(&mut state, rect.x, rect.y));
+            let moved = state.compose(120, 48).expect("motion while unfocused");
+            assert_agent_hover_backgrounds(&state, &moved, None);
+        }
+        state.handle_raw_events(vec![RawInputEvent::OuterFocusGained]);
+        let refocused = state.compose(120, 48).expect("refocused without motion");
+        assert_agent_hover_backgrounds(&state, &refocused, None);
+        assert!(move_over_agent_sidebar(&mut state, header.x, header.y));
+        let hovered = state.compose(120, 48).expect("refocused header hover");
+        assert_agent_hover_backgrounds(&state, &hovered, Some(header));
+    }
+}
+
+#[test]
+fn agent_sidebar_hover_is_suppressed_by_help_overlay() {
+    let (mut state, _) = agent_hover_test_state(false);
+    state
+        .compose(200, 48)
+        .expect("wide sidebar beside help overlay");
+    let row = agent_hover_row(&state, &ClientEndpointId::Local, "pane_2");
+    let header = agent_group_rect(&state, &ClientEndpointId::Local, "ws_1");
+    assert!(move_over_agent_sidebar(&mut state, row.x, row.y));
+    let hovered = state.compose(200, 48).expect("hover before help");
+    assert_agent_hover_backgrounds(&state, &hovered, Some(row));
+
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::Help),
+        &mut ClientShellInput::default(),
+    );
+    let help = state.compose(200, 48).expect("help overlay");
+    assert!(matches!(state.overlay, Some(ClientShellOverlay::Help(_))));
+    assert_agent_hover_backgrounds(&state, &help, None);
+    move_over_agent_sidebar(&mut state, header.x, header.y);
+    for rect in [header, row] {
+        assert!(!move_over_agent_sidebar(&mut state, rect.x, rect.y));
+        let moved = state.compose(200, 48).expect("modal sidebar motion");
+        assert_agent_hover_backgrounds(&state, &moved, None);
+    }
+}
+
+#[test]
+fn agent_workspace_groups_render_status_and_toggle_only_their_children() {
+    let mut state = state_with_workspace_agent_groups();
+    let frame = state.compose(120, 48).expect("workspace agent groups");
+    assert_eq!(
+        state
+            .hits
+            .agent_groups
+            .iter()
+            .map(|(_, endpoint, workspace)| (endpoint.clone(), workspace.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (ClientEndpointId::Local, "ws_1"),
+            (ClientEndpointId::Local, "ws_2")
+        ]
+    );
+    let alpha = agent_group_rect(&state, &ClientEndpointId::Local, "ws_1");
+    let beta = agent_group_rect(&state, &ClientEndpointId::Local, "ws_2");
+    assert_agent_group_status(&frame, alpha, "alpha", "×", state.config.palette.red);
+    assert_agent_group_status(&frame, beta, "beta", "◐", state.config.palette.yellow);
+    assert_eq!(
+        state
+            .hits
+            .agents
+            .iter()
+            .map(|(_, pane)| pane.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pane_1", "pane_2", "pane_b"]
+    );
+    assert!(alpha.y < state.hits.agents[0].0.y);
+    assert!(state.hits.agents[1].0.bottom() <= beta.y);
+    assert!(beta.y < state.hits.agents[2].0.y);
+
+    click_agent_group_header(&mut state, alpha);
+    let collapsed = state.compose(120, 48).expect("collapsed alpha agents");
+    assert_eq!(
+        state
+            .hits
+            .agents
+            .iter()
+            .map(|(_, pane)| pane.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pane_b"]
+    );
+    let alpha = agent_group_rect(&state, &ClientEndpointId::Local, "ws_1");
+    let beta = agent_group_rect(&state, &ClientEndpointId::Local, "ws_2");
+    assert_agent_group_status(&collapsed, alpha, "alpha", "×", state.config.palette.red);
+    assert_agent_group_status(&collapsed, beta, "beta", "◐", state.config.palette.yellow);
+    assert!(!frame_rows(&collapsed).join("\n").contains("alpha one"));
+    assert!(!frame_rows(&collapsed).join("\n").contains("alpha two"));
+
+    click_agent_group_header(&mut state, alpha);
+    let expanded = state.compose(120, 48).expect("expanded alpha agents");
+    assert_eq!(
+        state
+            .hits
+            .agents
+            .iter()
+            .map(|(_, pane)| pane.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pane_1", "pane_2", "pane_b"]
+    );
+    let text = frame_rows(&expanded).join("\n");
+    assert!(text.contains("alpha one"));
+    assert!(text.contains("alpha two"));
+}
+
+fn add_remote_agent_group(state: &mut ClientShellState) -> ClientEndpointId {
+    let profile = remote_profile();
+    let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Online);
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.workspaces[0].label = "remote-alpha".into();
+    remote.agents = vec![agent("remote one", AgentStatus::Idle, 1)];
+    state.set_endpoint_snapshot(&endpoint_id, Box::new(remote));
+    endpoint_id
+}
+
+#[test]
+fn agent_workspace_groups_isolate_same_workspace_id_across_endpoints() {
+    let mut state = state_with_workspace_agent_groups();
+    let remote = add_remote_agent_group(&mut state);
+    let frame = state
+        .compose(120, 48)
+        .expect("local and remote agent groups");
+    assert_eq!(
+        state
+            .hits
+            .agent_groups
+            .iter()
+            .map(|(_, endpoint, workspace)| (endpoint.clone(), workspace.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (ClientEndpointId::Local, "ws_1"),
+            (ClientEndpointId::Local, "ws_2"),
+            (remote.clone(), "ws_1"),
+        ]
+    );
+    let remote_header = agent_group_rect(&state, &remote, "ws_1");
+    assert_agent_group_status(
+        &frame,
+        remote_header,
+        "remote-alpha",
+        "○",
+        state.config.palette.green,
+    );
+    let alpha = agent_group_rect(&state, &ClientEndpointId::Local, "ws_1");
+    click_agent_group_header(&mut state, alpha);
+    let collapsed = state.compose(120, 48).expect("only local alpha collapsed");
+    assert_agent_group_status(
+        &collapsed,
+        agent_group_rect(&state, &ClientEndpointId::Local, "ws_1"),
+        "alpha",
+        "×",
+        state.config.palette.red,
+    );
+    assert_agent_group_status(
+        &collapsed,
+        agent_group_rect(&state, &ClientEndpointId::Local, "ws_2"),
+        "beta",
+        "◐",
+        state.config.palette.yellow,
+    );
+    assert_eq!(
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .map(|(_, endpoint, pane)| (endpoint.clone(), pane.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (ClientEndpointId::Local, "pane_b"),
+            (remote.clone(), "pane_1")
+        ]
+    );
+    assert!(!state
+        .collapsed_agent_groups
+        .contains(&(remote.clone(), "ws_1".into())));
+
+    let remote_header = agent_group_rect(&state, &remote, "ws_1");
+    click_agent_group_header(&mut state, remote_header);
+    let collapsed = state.compose(120, 48).expect("both alpha groups collapsed");
+    assert_eq!(
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .map(|(_, endpoint, pane)| (endpoint.clone(), pane.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(ClientEndpointId::Local, "pane_b")]
+    );
+    assert_agent_group_status(
+        &collapsed,
+        agent_group_rect(&state, &remote, "ws_1"),
+        "remote-alpha",
+        "○",
+        state.config.palette.green,
+    );
+    click_agent_group_header(&mut state, remote_header);
+    state.compose(120, 48).expect("only remote alpha restored");
+    assert_eq!(
+        state
+            .hits
+            .endpoint_agents
+            .iter()
+            .map(|(_, endpoint, pane)| (endpoint.clone(), pane.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(ClientEndpointId::Local, "pane_b"), (remote, "pane_1")]
+    );
+}
+
+#[test]
+fn agent_workspace_groups_local_navigation_reveals_collapsed_targets() {
+    use crate::api::schema::{Method, PaneTarget};
+    use crate::input::KeybindAction;
+
+    for (action, pane_id, workspace_id) in [
+        (KeybindAction::FocusAgent(2), "pane_2", "ws_1"),
+        (KeybindAction::NextAgent, "pane_b", "ws_2"),
+        (KeybindAction::PreviousAgent, "pane_2", "ws_1"),
+    ] {
+        let mut state = state_with_workspace_agent_groups();
+        state.collapsed_agent_groups.extend([
+            (ClientEndpointId::Local, "ws_1".into()),
+            (ClientEndpointId::Local, "ws_2".into()),
+        ]);
+        state.compose(120, 48).expect("collapsed local groups");
+        assert!(state.hits.agents.is_empty());
+        assert!(matches!(
+            state.endpoint_method_for_action(action),
+            Some(Method::PaneFocus(PaneTarget { pane_id: target })) if target == pane_id
+        ));
+        state
+            .compose(120, 48)
+            .expect("local navigation reveals target");
+        assert!(state.hits.agents.iter().any(|(_, pane)| pane == pane_id));
+        let other_workspace = if workspace_id == "ws_1" {
+            "ws_2"
+        } else {
+            "ws_1"
+        };
+        assert!(state
+            .collapsed_agent_groups
+            .contains(&(ClientEndpointId::Local, other_workspace.into())));
+    }
+}
+
+#[test]
+fn agent_workspace_groups_navigation_expands_only_the_target_endpoint() {
+    for target_remote in [false, true] {
+        let mut state = state_with_workspace_agent_groups();
+        let remote = add_remote_agent_group(&mut state);
+        state
+            .collapsed_agent_groups
+            .insert((ClientEndpointId::Local, "ws_1".into()));
+        state
+            .collapsed_agent_groups
+            .insert((remote.clone(), "ws_1".into()));
+        state.compose(120, 48).expect("hidden navigation targets");
+        let (target_endpoint, pane_id, other_endpoint) = if target_remote {
+            (remote.clone(), "pane_1", ClientEndpointId::Local)
+        } else {
+            (ClientEndpointId::Local, "pane_2", remote.clone())
+        };
+        assert!(!state
+            .hits
+            .endpoint_agents
+            .iter()
+            .any(|(_, endpoint, pane)| { endpoint == &target_endpoint && pane == pane_id }));
+        let targets = super::super::aggregate_navigation::online_agent_targets(
+            &state.endpoints,
+            &state.active_endpoint_id,
+            state.config.agent_panel_sort,
+        );
+        let index = targets
+            .iter()
+            .position(|target| target.endpoint_id == target_endpoint && target.pane_id == pane_id)
+            .expect("agent remains a navigation target while collapsed");
+        let mut outcome = ClientShellInput::default();
+        assert!(state.handle_endpoint_navigation(
+            crate::input::KeybindAction::FocusAgent(index),
+            &mut outcome,
+        ));
+        if target_remote {
+            assert!(state.activate_endpoint_projection(&remote));
+        }
+        state
+            .compose(120, 48)
+            .expect("selected hidden agent revealed");
+        assert!(state
+            .hits
+            .endpoint_agents
+            .iter()
+            .any(|(_, endpoint, pane)| { endpoint == &target_endpoint && pane == pane_id }));
+        assert!(state
+            .collapsed_agent_groups
+            .contains(&(other_endpoint, "ws_1".into())));
+        assert!(!state
+            .collapsed_agent_groups
+            .contains(&(target_endpoint, "ws_1".into())));
+    }
+}
+
 #[test]
 fn machine_diagnostic_badge_reopens_notice_without_collapsing_machine() {
     let (mut state, id) = state_with_remote();

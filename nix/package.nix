@@ -8,6 +8,9 @@
   zstd,
   pkg-config,
   git,
+  just,
+  libnotify,
+  installShellFiles,
   cctools ? null,
   xcbuild ? null,
 }:
@@ -42,8 +45,10 @@ rustPlatform.buildRustPackage {
         ../assets
         ../crates
         ../distribution/install.ps1
+        ../distribution/latest.json
         ../docs/next/api/herdr-api.schema.json
         ../src
+        ../tests/fixtures
         ../vendor/libghostty-vt
         ../vendor/libghostty-vt.vendor.json
         ../vendor/portable-pty
@@ -51,24 +56,40 @@ rustPlatform.buildRustPackage {
         ../Cargo.lock
         ../Cargo.toml
         ../skills/herdr/SKILL.md
+        ../justfile
       ]
     );
   };
 
   cargoLock = {
-    lockFile = ../Cargo.lock;
+    lockFileContents = builtins.readFile ../Cargo.lock;
   };
 
   nativeBuildInputs = [
     git
     pkg-config
+    installShellFiles
   ] ++ darwinToolchain;
+
+  nativeCheckInputs = [ just ];
+
+  postPatch = ''
+    substituteInPlace crates/ghostty-vt/build.rs \
+      --replace-fail '.arg("build")' '.arg("build")
+          .arg("-Dcpu=baseline")' \
+      --replace-fail '.arg(format!("-Dtarget={zig_target}"))' ""
+  '' + lib.optionalString stdenv.hostPlatform.isLinux ''
+    substituteInPlace src/platform/linux.rs \
+      --replace-fail 'let mut cmd = command("notify-send");' \
+        'let mut cmd = command("${libnotify}/bin/notify-send");'
+  '';
 
   env = {
     LIBGHOSTTY_VT_OPTIMIZE = "ReleaseFast";
     LIBGHOSTTY_VT_SIMD = "true";
     LIBGHOSTTY_VT_ZIG_SYSTEM_DIR = zigDeps;
     ZIG = lib.getExe zig_0_16;
+    CARGO_BUILD_TARGET = stdenv.hostPlatform.rust.rustcTarget;
   };
 
   preBuild = ''
@@ -76,10 +97,20 @@ rustPlatform.buildRustPackage {
     export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local-cache"
   '';
 
-  # Rust tests are covered by the normal CI workflow. The Nix check is
-  # intentionally build-only so it validates packaging inputs without
-  # duplicating the full Rust test suite.
-  doCheck = false;
+  doCheck = stdenv.buildPlatform.canExecute stdenv.hostPlatform;
+  checkPhase = ''
+    runHook preCheck
+    just nix-test
+    just bench-render-scale server::render_scale_benchmark::render_scale_profile
+    runHook postCheck
+  '';
+
+  postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
+    installShellCompletion --cmd herdr \
+      --bash <("$out/bin/herdr" completion bash) \
+      --fish <("$out/bin/herdr" completion fish) \
+      --zsh <("$out/bin/herdr" completion zsh)
+  '';
 
   meta = {
     description = "Terminal workspace manager for AI coding agents";

@@ -95,6 +95,7 @@ pub(super) struct ShellHitMap {
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
     pub(super) endpoint_agents: Vec<(Rect, ClientEndpointId, String)>,
+    pub(super) agent_groups: Vec<(Rect, ClientEndpointId, String)>,
     pub(super) agent_body: Rect,
     pub(super) agent_scrollbar: Rect,
     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -871,6 +872,8 @@ pub(crate) struct ClientShellState {
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
+    pub(super) collapsed_agent_groups: HashSet<(ClientEndpointId, String)>,
+    pub(super) agent_hover_point: Option<(u16, u16)>,
     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
     pub(super) tab_scroll: usize,
     pub(super) mobile_switcher_scroll: usize,
@@ -1036,6 +1039,8 @@ impl ClientShellState {
             remote_collapsed_groups,
             workspace_scroll: 0,
             agent_scroll: 0,
+            collapsed_agent_groups: HashSet::new(),
+            agent_hover_point: None,
             pending_agent_reveal: None,
             tab_scroll: 0,
             mobile_switcher_scroll: 0,
@@ -1127,6 +1132,25 @@ impl ClientShellState {
     pub(super) fn mobile_layout_active(&self) -> bool {
         self.last_composed_size
             .is_some_and(|(cols, rows)| !self.layout(cols, rows).mobile_header.is_empty())
+    }
+
+    pub(super) fn sidebar_agent_hover_point(&self) -> Option<(u16, u16)> {
+        if self.config.mouse_capture
+            && !self.sidebar_collapsed
+            && !self.mobile_layout_active()
+            && self.overlay.is_none()
+            && !self.popup_pending
+            && self.popup_terminal_id.is_none()
+            && self.hits.popup.is_none()
+            && self.outer_focused != Some(false)
+            && self.chrome_drag.is_none()
+            && self.pane_mouse_gesture.is_none()
+            && self.mode != ClientShellMode::Copy
+        {
+            self.agent_hover_point
+        } else {
+            None
+        }
     }
 
     pub(super) fn collapsed_groups_for_endpoint(

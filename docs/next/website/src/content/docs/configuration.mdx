@@ -479,6 +479,14 @@ Metadata reporters provide values only; styling stays in the local sidebar confi
 
 Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
 
+### Workspace agent groups
+
+This fork groups the expanded desktop Agents panel by workspace when `ui.agent_panel_sort = "spaces"`. Each workspace has a bold header with its aggregate agent status and status color, followed by indented agent rows. Click the header to collapse or expand its children; its status remains visible while collapsed.
+
+Collapsed groups are client-local. Agent shortcuts reveal their target and expand its group, including when only the local machine is configured. Local and SSH groups are independent, even when workspace IDs match. Priority sorting and plugin-defined Agent views keep their flat ordering.
+
+Agent rows and group headers highlight across their full width on mouse hover using the theme's `surface1` color. Hover does not focus a pane or send input to it. The focused-row background takes precedence and also covers the indentation. Hover requires mouse capture and an active outer terminal window, and is suppressed by modal overlays. Collapsed-sidebar and mobile layouts are unchanged.
+
 ## Notifications
 
 Herdr can notify you when a background agent finishes or needs input:

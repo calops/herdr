@@ -490,21 +490,13 @@ fn render_pane_borders(
         {
             continue;
         }
-        let focused = pane_infos
-            .iter()
-            .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
         let symbol = line_cell_symbol(line);
         if symbol.is_empty() {
             continue;
         }
         let cell = &mut buf[(x, y)];
         cell.set_symbol(symbol);
-        let color = if focused {
-            app.palette.accent
-        } else {
-            app.palette.overlay0
-        };
-        cell.set_style(Style::default().fg(color));
+        cell.set_style(Style::default().fg(app.palette.surface_dim));
     }
 
     render_pane_border_titles(app, ws, pane_infos, frame);
@@ -606,30 +598,6 @@ fn add_pane_border_cells(
             cell.down |= y < bottom;
         }
     }
-}
-
-fn line_touches_pane(x: u16, y: u16, info: &PaneInfo, pane_gaps: bool) -> bool {
-    let rect = info.rect;
-    if rect.width == 0 || rect.height == 0 {
-        return false;
-    }
-    let right = rect.x.saturating_add(rect.width).saturating_sub(1);
-    let bottom = rect.y.saturating_add(rect.height).saturating_sub(1);
-    let in_rows = y >= rect.y && y <= bottom;
-    let in_cols = x >= rect.x && x <= right;
-    let own_border =
-        (in_rows && (x == rect.x || x == right)) || (in_cols && (y == rect.y || y == bottom));
-
-    if pane_gaps {
-        return own_border;
-    }
-
-    let shared_right = rect.x.saturating_add(rect.width);
-    let shared_bottom = rect.y.saturating_add(rect.height);
-    own_border
-        || (in_rows && x == shared_right)
-        || (in_cols && y == shared_bottom)
-        || (x == shared_right && y == shared_bottom)
 }
 
 fn render_pane_border_titles(
@@ -1105,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn global_pane_border_renderer_composes_junctions_and_focus_style() {
+    fn global_pane_border_renderer_composes_junctions() {
         let mut app = AppState::test_new();
         app.view.terminal_area = Rect::new(0, 0, 4, 4);
         app.view.pane_infos = vec![
@@ -1168,45 +1136,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(2, 2)].symbol(), "┼");
-        assert_eq!(buffer[(2, 2)].style().fg, Some(app.palette.accent));
         assert_eq!(buffer[(2, 1)].symbol(), "│");
-        assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.accent));
-    }
-
-    #[test]
-    fn gapped_pane_focus_does_not_color_neighbor_border() {
-        let mut app = AppState::test_new();
-        app.pane_gaps = true;
-        app.view.terminal_area = Rect::new(0, 0, 4, 3);
-        app.view.pane_infos = vec![
-            PaneInfo {
-                id: PaneId::from_raw(1),
-                rect: Rect::new(0, 0, 2, 3),
-                inner_rect: Rect::default(),
-                scrollbar_rect: None,
-                borders: Borders::ALL,
-                is_focused: true,
-            },
-            PaneInfo {
-                id: PaneId::from_raw(2),
-                rect: Rect::new(2, 0, 2, 3),
-                inner_rect: Rect::default(),
-                scrollbar_rect: None,
-                borders: Borders::ALL,
-                is_focused: false,
-            },
-        ];
-        let ws = Workspace::test_new("test");
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(4, 3)).unwrap();
-
-        terminal
-            .draw(|frame| render_view_pane_borders(&app, &ws, &[], frame))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(1, 1)].style().fg, Some(app.palette.accent));
-        assert_eq!(buffer[(2, 1)].style().fg, Some(app.palette.overlay0));
     }
 
     #[tokio::test]

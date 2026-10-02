@@ -651,7 +651,37 @@ impl ClientShellState {
         }
     }
 
+    fn agent_hover_rect(&self, point: Option<(u16, u16)>) -> Option<Rect> {
+        let point = point?;
+        self.hits
+            .agent_groups
+            .iter()
+            .map(|(rect, _, _)| *rect)
+            .chain(self.hits.agents.iter().map(|(rect, _)| *rect))
+            .chain(self.hits.endpoint_agents.iter().map(|(rect, _, _)| *rect))
+            .find(|rect| super::contains(*rect, point))
+    }
+
+    pub(super) fn clear_agent_hover(&mut self) -> bool {
+        let previous = self.agent_hover_rect(self.agent_hover_point);
+        self.agent_hover_point = None;
+        previous.is_some()
+    }
+
+    fn update_agent_hover(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        let previous = self.agent_hover_rect(self.agent_hover_point);
+        let point = (mouse.column, mouse.row);
+        self.agent_hover_point = (!matches!(mouse.kind, MouseEventKind::Drag(_))).then_some(point);
+        self.agent_hover_point = self.sidebar_agent_hover_point();
+        let current = self.agent_hover_rect(self.agent_hover_point);
+        if current.is_none() && !super::contains(self.hits.agent_body, point) {
+            self.agent_hover_point = None;
+        }
+        outcome.repaint |= previous != current;
+    }
+
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        self.update_agent_hover(mouse, outcome);
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
         if self.mode == ClientShellMode::Navigate
@@ -1910,6 +1940,23 @@ impl ClientShellState {
                 self.workspace_press = None;
                 self.tab_press = None;
                 self.chrome_drag = None;
+                let agent_group = self
+                    .hits
+                    .agent_groups
+                    .iter()
+                    .find(|(rect, _, _)| super::contains(*rect, point))
+                    .map(|(_, endpoint_id, workspace_id)| {
+                        (endpoint_id.clone(), workspace_id.clone())
+                    });
+                if let Some(group) = agent_group {
+                    if !self.collapsed_agent_groups.remove(&group) {
+                        self.collapsed_agent_groups.insert(group);
+                        // The shorter list may no longer reach the current scroll offset.
+                        self.agent_scroll = 0;
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 if super::contains(self.hits.sidebar_divider, point)
                     && !super::contains(self.hits.sidebar_toggle, point)
                 {

@@ -884,9 +884,13 @@ impl ClientShellState {
                     snapshot,
                     self.config.agent_panel_sort,
                 );
-                Some(Method::PaneFocus(PaneTarget {
-                    pane_id: agents.get(index)?.clone(),
-                }))
+                let pane_id = agents.get(index)?.clone();
+                self.reveal_endpoint_agent(
+                    &ClientEndpointId::Local,
+                    &pane_id,
+                    self.hits.agent_body.height,
+                );
+                Some(Method::PaneFocus(PaneTarget { pane_id }))
             }
             KeybindAction::PreviousAgent | KeybindAction::NextAgent => {
                 let agents = super::agent_sidebar::ordered_agent_pane_ids(
@@ -909,14 +913,11 @@ impl ClientShellState {
                     _ => unreachable!("relative agent action"),
                 };
                 let pane_id = agents[next].clone();
-                if !self
-                    .hits
-                    .agents
-                    .iter()
-                    .any(|(_, visible_pane_id)| visible_pane_id == &pane_id)
-                {
-                    self.agent_scroll = next.min(self.hits.agent_max_scroll);
-                }
+                self.reveal_endpoint_agent(
+                    &ClientEndpointId::Local,
+                    &pane_id,
+                    self.hits.agent_body.height,
+                );
                 Some(Method::PaneFocus(PaneTarget { pane_id }))
             }
             KeybindAction::SwitchWorkspace(index) => {

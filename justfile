@@ -25,6 +25,12 @@ test-windows-input *args:
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
+
+# Sidebar behavior checks run in the same derivation installed by Nix.
+nix-test:
+    cargo test --release --locked --bin herdr client::shell::tests -- --nocapture
+    cargo test --release --locked --bin herdr ui::panes::tests -- --nocapture
+
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
     {{python}} -m unittest scripts.test_ui_hot_path_architecture
@@ -84,8 +90,8 @@ build:
     cargo build --release --locked
 
 # Non-gating full-render scaling profile for background workspaces and active panes
-bench-render-scale:
-    cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
+bench-render-scale filter='render_scale_profile':
+    cargo test --release --locked --bin herdr "{{filter}}" -- --ignored --nocapture --test-threads=1
 
 # Profile terminal target name resolution at increasing pane counts.
 bench-terminal-targets:

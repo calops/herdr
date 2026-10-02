@@ -54,6 +54,7 @@ impl ClientShellState {
                 && self.endpoint_status(&self.active_endpoint_id)
                     == Some(ClientEndpointStatus::Online)
         });
+        let agent_hover_point = self.sidebar_agent_hover_point();
         let mut render_state = render::ShellRenderState {
             machine_diagnostics: &self.machine_diagnostics,
             endpoints: &self.endpoints,
@@ -63,6 +64,8 @@ impl ClientShellState {
             remote_collapsed_groups: &self.remote_collapsed_groups,
             workspace_scroll: &mut self.workspace_scroll,
             agent_scroll: &mut self.agent_scroll,
+            collapsed_agent_groups: &self.collapsed_agent_groups,
+            agent_hover_point,
             tab_scroll: &mut self.tab_scroll,
             reveal_focused_workspace: &mut self.reveal_focused_workspace,
             reveal_focused_tab: &mut self.reveal_focused_tab,
@@ -204,6 +207,7 @@ impl ClientShellState {
             ),
             _ => (None, None),
         };
+        let agent_hover_point = self.sidebar_agent_hover_point();
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,
@@ -219,6 +223,8 @@ impl ClientShellState {
                 remote_collapsed_groups: &self.remote_collapsed_groups,
                 workspace_scroll: &mut self.workspace_scroll,
                 agent_scroll: &mut self.agent_scroll,
+                collapsed_agent_groups: &self.collapsed_agent_groups,
+                agent_hover_point,
                 tab_scroll: &mut self.tab_scroll,
                 reveal_focused_workspace: &mut self.reveal_focused_workspace,
                 reveal_focused_tab: &mut self.reveal_focused_tab,
