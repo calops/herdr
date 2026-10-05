@@ -640,7 +640,7 @@ pub(in crate::client::shell) fn render_tree_row(
                 );
             }
             let indent = if entry.indented { 4 } else { 0 };
-            let trunk_x = rect.x.saturating_add(indent + 1);
+            let trunk_x = rect.x.saturating_add(indent + 2);
             if !last && rect.height > 1 {
                 put_text(
                     buffer,
@@ -655,15 +655,15 @@ pub(in crate::client::shell) fn render_tree_row(
                 for y in rect.y..rect.bottom() {
                     put_text(
                         buffer,
-                        rect.x + 1,
+                        rect.x + 2,
                         y,
-                        rect.width.saturating_sub(1),
+                        rect.width.saturating_sub(2),
                         "│",
                         Style::default().fg(palette.overlay0),
                     );
                 }
             }
-            let offset = rect.width.min(indent + 3);
+            let offset = rect.width.min(indent + 4);
             let content = Rect::new(rect.x + offset, rect.y, rect.width - offset, rect.height);
             super::agent_sidebar::render_agent_row(buffer, content, agent, focused, config);
             put_text(
@@ -915,14 +915,14 @@ pub(in crate::client::shell) fn render_workspace_rows(
         if entry.indented {
             let prefix = if row_index == 0 {
                 if entry.last_child {
-                    " ╰──"
+                    "  ╰──"
                 } else {
-                    " ├──"
+                    "  ├──"
                 }
             } else if entry.last_child {
-                "    "
+                "     "
             } else {
-                " │  "
+                "  │  "
             };
             put_text(
                 buffer,
@@ -934,7 +934,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
             );
         }
         if row_index > 0 && has_children {
-            let trunk_x = area.x.saturating_add(indent + 1);
+            let trunk_x = area.x.saturating_add(indent + 2);
             put_text(
                 buffer,
                 trunk_x,
@@ -946,7 +946,7 @@ pub(in crate::client::shell) fn render_workspace_rows(
         }
         let x = area
             .x
-            .saturating_add(indent + if row_index == 0 { 1 } else { 3 })
+            .saturating_add(indent + if row_index == 0 { 2 } else { 4 })
             .min(area.right());
         let highlighted = focused || dragged;
         let workspace_style = Style::default()
