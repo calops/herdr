@@ -15,6 +15,7 @@ pub(super) struct AgentRow {
     pub(super) workspace_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
+    pub(super) harness: Option<&'static str>,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
 }
 
@@ -131,6 +132,7 @@ pub(super) fn agent_row(
         workspace_id: agent.workspace_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
+        harness: canonical_agent.map(crate::detect::agent_label),
         rows,
     })
 }
@@ -142,6 +144,9 @@ pub(super) fn render_agent_row(
     focused: bool,
     config: &ClientShellConfig,
 ) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
     let palette = &config.palette;
     let row_style = if focused {
         Style::default().bg(palette.active_row_bg)
@@ -163,8 +168,16 @@ pub(super) fn render_agent_row(
         status_icon(row.status, config.status_indicators),
         Style::default().fg(status_color(row.status, palette)),
     );
+    let harness_width = row
+        .harness
+        .map_or(0, |harness| harness.len().min(rect.width as usize) as u16);
     for (index, tokens) in row.rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
+        let content_width = if index == 0 && harness_width > 0 {
+            rect.width.saturating_sub(harness_width + 1)
+        } else {
+            rect.width
+        };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
@@ -174,10 +187,16 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            content_width.saturating_sub(indent as u16) as usize,
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
-            Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
+            Rect::new(rect.x, rect.y + index as u16, content_width, 1),
+            buffer,
+        );
+    }
+    if let Some(harness) = row.harness {
+        Paragraph::new(harness).style(secondary).render(
+            Rect::new(rect.right() - harness_width, rect.y, harness_width, 1),
             buffer,
         );
     }

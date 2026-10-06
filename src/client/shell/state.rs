@@ -854,6 +854,8 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_width_manual: bool,
     pub(super) agent_panel_sort_manual: bool,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
+    pub(super) last_agent_group_click:
+        Option<(ClientEndpointId, String, (u16, u16), std::time::Instant)>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
     pub(super) tab_press: Option<ClientTabPress>,
@@ -1013,6 +1015,7 @@ impl ClientShellState {
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
             last_sidebar_divider_click: None,
+            last_agent_group_click: None,
             chrome_drag: None,
             workspace_press: None,
             tab_press: None,

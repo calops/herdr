@@ -150,6 +150,12 @@ pub(crate) fn space_rows(
                         SpaceSidebarToken::Workspace => {
                             Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
                         }
+                        SpaceSidebarToken::Projects => context
+                            .tokens
+                            .get("projects")
+                            .filter(|value| !value.is_empty())
+                            .cloned()
+                            .map(ResolvedTokenKind::Custom),
                         SpaceSidebarToken::Branch if !context.suppress_git_details => context
                             .branch
                             .map(|branch| ResolvedTokenKind::Branch(branch.to_string())),
@@ -537,8 +543,11 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
     }
 
     #[test]
-    fn grouped_children_suppress_all_builtin_git_details() {
-        let config = SpacesSidebarConfig::default();
+    fn grouped_children_keep_projects_but_suppress_branch_and_git_status() {
+        let mut config = SpacesSidebarConfig::default();
+        config.rows.push(vec![SpaceSidebarToken::Projects]);
+        let tokens =
+            std::collections::HashMap::from([("projects".into(), "backend, frontend".into())]);
 
         assert_eq!(
             space_rows(
@@ -548,14 +557,19 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
                     branch: Some("worktree/feature"),
                     state_text: "idle",
                     ahead_behind: Some((2, 1)),
-                    tokens: &std::collections::HashMap::new(),
+                    tokens: &tokens,
                     suppress_git_details: true,
                 },
             ),
-            vec![vec![
-                ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
-                ResolvedToken::unstyled(ResolvedTokenKind::Workspace("feature".into())),
-            ]]
+            vec![
+                vec![
+                    ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                    ResolvedToken::unstyled(ResolvedTokenKind::Workspace("feature".into())),
+                ],
+                vec![ResolvedToken::unstyled(ResolvedTokenKind::Custom(
+                    "backend, frontend".into(),
+                ))],
+            ]
         );
     }
 

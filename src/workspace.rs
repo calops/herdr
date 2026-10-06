@@ -48,6 +48,13 @@ pub struct WorkspaceGitStatus {
     pub branch: Option<String>,
     pub ahead_behind: Option<(usize, usize)>,
     pub space: Option<GitSpaceMetadata>,
+    pub projects: Option<WorkspaceGitProjects>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceGitProjects {
+    pub cwd_cache_keys: HashMap<PathBuf, PathBuf>,
+    pub names: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +104,7 @@ impl WorkspaceGitStatusSnapshot {
             branch: self.branch,
             ahead_behind: self.ahead_behind,
             space: self.space,
+            projects: None,
         }
     }
 }
@@ -192,6 +200,9 @@ pub struct Workspace {
     pub(crate) cached_git_ahead_behind: Option<(usize, usize)>,
     /// Cached derived Git repo metadata for worktree actions and status display.
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
+    /// Repository names and discovery keys for all effective pane CWDs.
+    pub(crate) cached_git_projects: String,
+    pub(crate) cached_git_project_keys: HashMap<PathBuf, PathBuf>,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
     pub(crate) metadata_tokens: crate::metadata_tokens::MetadataTokens,
@@ -259,6 +270,8 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space,
+            cached_git_projects: String::new(),
+            cached_git_project_keys: HashMap::new(),
             worktree_space: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),
@@ -411,6 +424,8 @@ impl Workspace {
                 cached_git_branch: git_branch(&initial_cwd),
                 cached_git_ahead_behind: None,
                 cached_git_space,
+                cached_git_projects: String::new(),
+                cached_git_project_keys: HashMap::new(),
                 worktree_space: None,
                 metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
                 metadata_token_sequences: HashMap::new(),
@@ -1019,6 +1034,26 @@ impl Workspace {
             .or_else(|| Some(self.identity_cwd.clone()))
     }
 
+    pub(crate) fn project_cwds_from(
+        &self,
+        terminals: &HashMap<TerminalId, TerminalState>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> Vec<PathBuf> {
+        let mut cwds: Vec<_> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                tab.panes.keys().filter_map(move |&pane_id| {
+                    tab.foreground_cwd_for_pane(pane_id, terminal_runtimes)
+                        .or_else(|| tab.cwd_for_pane(pane_id, terminals, terminal_runtimes))
+                })
+            })
+            .collect();
+        cwds.sort_unstable();
+        cwds.dedup();
+        cwds
+    }
+
     #[cfg(test)]
     pub fn display_name(&self) -> String {
         if let Some(name) = &self.custom_name {
@@ -1200,6 +1235,8 @@ impl Workspace {
             cached_git_branch: git_branch(&identity_cwd),
             cached_git_ahead_behind: None,
             cached_git_space: None,
+            cached_git_projects: String::new(),
+            cached_git_project_keys: HashMap::new(),
             worktree_space: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             metadata_token_sequences: HashMap::new(),

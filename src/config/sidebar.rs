@@ -128,6 +128,7 @@ pub enum SpaceSidebarToken {
     StateIcon,
     StateText,
     Workspace,
+    Projects,
     Branch,
     GitStatus,
     Custom(String),
@@ -289,6 +290,7 @@ fn space_token_name(token: &SpaceSidebarToken) -> String {
         SpaceSidebarToken::StateIcon => "state_icon".into(),
         SpaceSidebarToken::StateText => "state_text".into(),
         SpaceSidebarToken::Workspace => "workspace".into(),
+        SpaceSidebarToken::Projects => "projects".into(),
         SpaceSidebarToken::Branch => "branch".into(),
         SpaceSidebarToken::GitStatus => "git_status".into(),
         SpaceSidebarToken::Custom(name) => format!("${name}"),
@@ -385,6 +387,7 @@ impl<'de> Deserialize<'de> for SpaceSidebarToken {
                 ("state_icon", Self::StateIcon),
                 ("state_text", Self::StateText),
                 ("workspace", Self::Workspace),
+                ("projects", Self::Projects),
                 ("branch", Self::Branch),
                 ("git_status", Self::GitStatus),
             ],
@@ -525,7 +528,7 @@ row_gap = 1
 claude = [["terminal_title_stripped"], ["agent", "$model"]]
 
 [ui.sidebar.spaces]
-rows = [["workspace"], ["$jj_status"]]
+rows = [["workspace", "projects"], ["$jj_status"]]
 row_gap = 3
 "#,
         )
@@ -558,6 +561,10 @@ row_gap = 3
             ]
         );
         assert_eq!(config.ui.sidebar.agents.row_gap, 1);
+        assert_eq!(
+            config.ui.sidebar.spaces.rows[0],
+            vec![SpaceSidebarToken::Workspace, SpaceSidebarToken::Projects]
+        );
         assert_eq!(
             config.ui.sidebar.spaces.rows[1],
             vec![SpaceSidebarToken::Custom("jj_status".into())]

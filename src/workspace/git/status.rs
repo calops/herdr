@@ -17,6 +17,7 @@ use super::{
 pub struct GitStatusRefreshDemand {
     pub branch: bool,
     pub ahead_behind: bool,
+    pub projects: bool,
 }
 
 impl GitStatusRefreshDemand {
@@ -24,11 +25,8 @@ impl GitStatusRefreshDemand {
     pub const ALL: Self = Self {
         branch: true,
         ahead_behind: true,
+        projects: true,
     };
-
-    pub fn is_empty(self) -> bool {
-        !self.branch && !self.ahead_behind
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,6 +435,7 @@ mod tests {
             GitStatusRefreshDemand {
                 branch: true,
                 ahead_behind: false,
+                projects: false,
             },
         );
 

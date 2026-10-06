@@ -397,6 +397,7 @@ Space rows accept these built-in tokens:
 - `state_icon` — colored icon for the space's rolled-up agent state.
 - `state_text` — text for the rolled-up agent state.
 - `workspace` — workspace name.
+- `projects` — comma-separated Git repository names from the working directories of all panes across every tab in the workspace, deduplicated and sorted alphabetically (for example, `backend, frontend`). Non-Git panes are ignored; branches and worktree checkout directory names are not repository names. Available on grouped worktree children too.
 - `branch` — Git branch when available.
 - `git_status` — Git ahead and behind counts when nonzero.
 - `$name` — custom workspace metadata named `name`.
@@ -412,6 +413,18 @@ rows = [
   [{ token = "$summary", fg = "#89b4fa", bold = true, dim = false }],
 ]
 ```
+
+To show repositories rather than branch and ahead/behind metadata below the workspace name:
+
+```toml
+[ui.sidebar.spaces]
+rows = [
+  ["state_icon", "workspace"],
+  [{ token = "projects", fg = "#6c7086", bold = false }],
+]
+```
+
+`projects` uses cached metadata supplied by the server, not client-side Git discovery. It requires a server version that publishes the project list; an older server leaves the token absent. If no pane belongs to a Git repository, the projects-only row disappears.
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
@@ -483,9 +496,15 @@ Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mob
 
 This fork combines the expanded desktop Spaces and Agents panels into one workspace-first tree. Workspaces keep their configured metadata, and agents appear beneath their workspace. Each item supports up to two lines. One empty line separates workspace groups, including workspaces without agents.
 
-The status icons form the tree: disclosure arrows have one space before the workspace dot, vertical guides continue through workspace metadata and nonlast agent descriptions, `├──` connects intermediate agents, and a rounded `╰──` connects the last agent without extending below it. State-icon tokens are placed in the fixed tree-dot column while other token ordering and styling are preserved.
+Workspace groups have no disclosure arrow or reserved arrow padding. Vertical guides continue through workspace metadata and nonlast agent descriptions, `├──` connects intermediate agents, and a rounded `╰──` connects the last agent without extending below it. Expanded rows place state-icon tokens before the label while preserving other token ordering and styling.
 
-Click a workspace label to focus that workspace; use its separate arrow to collapse or expand agent children. Either line of an agent focuses its pane. Collapsed groups are client-local, and agent shortcuts reveal their target and expand its ancestors. Local and SSH groups remain independent. Agent sorting and plugin views retain their ordering within each workspace rather than introducing another panel.
+Tree guides descend in the workspace status-dot column. Workspace metadata and agent rows have no leftover disclosure-arrow indentation.
+
+Workspace names use bold, normal theme `text` color in both expanded and folded states, including unfocused workspaces. Project metadata and trailing fold-marker dots retain their muted colors.
+
+Double-click anywhere within a workspace group to fold or unfold it, including its header, metadata, or either line of an agent. Workspace names are bold in both states. Folded groups occupy one line containing the colored status dot and workspace name followed by muted middle dots to the right edge; metadata and agents are hidden. Long names truncate to retain a visible fold marker. Single-click a workspace label to focus that workspace, or either line of an agent to focus its pane. Rapid clicks at different row positions do not count as a double-click. Collapsed groups are client-local, and agent shortcuts reveal their target and expand its ancestors. Local and SSH groups remain independent. Agent sorting and plugin views retain their ordering within each workspace rather than introducing another panel.
+
+The first agent line shows its canonical harness (`claude`, `omp`, and other recognized harnesses) at the right edge in muted text. The name truncates before the harness with a one-column gap; the description keeps its full row width.
 
 For an agent name followed by its gray description, configure:
 
@@ -497,7 +516,7 @@ rows = [
 ]
 ```
 
-Workspace and agent hover backgrounds cover both lines and the indentation using the theme's `surface1` color. Focus and navigation-selection backgrounds take precedence. Hover never focuses a pane or sends input. The entire tree uses one scrollbar; wheel input over an agent scrolls the same workspace tree. Hover requires mouse capture and an active outer terminal window, and is suppressed by modal overlays. Collapsed-sidebar and mobile layouts retain their compact presentation.
+Workspace and agent hover backgrounds cover both lines and the indentation using the theme's `surface1` color. The focused agent keeps its row background; its workspace has no focus background and uses brighter tree guides instead. Explicit workspace navigation selection still highlights the workspace. Focus and navigation-selection backgrounds take precedence over hover. Hover never focuses a pane or sends input. The entire tree uses one scrollbar; wheel input over an agent scrolls the same workspace tree. Hover requires mouse capture and an active outer terminal window, and is suppressed by modal overlays. Collapsed-sidebar and mobile layouts retain their compact presentation.
 
 ## Notifications
 

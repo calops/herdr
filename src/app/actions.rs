@@ -1336,6 +1336,23 @@ impl AppState {
                 continue;
             };
 
+            if let Some(projects) = result.projects {
+                let cwds =
+                    self.workspaces[ws_idx].project_cwds_from(&self.terminals, terminal_runtimes);
+                if cwds.len() == projects.cwd_cache_keys.len()
+                    && cwds
+                        .iter()
+                        .all(|cwd| projects.cwd_cache_keys.contains_key(cwd))
+                {
+                    let ws = &mut self.workspaces[ws_idx];
+                    ws.cached_git_project_keys = projects.cwd_cache_keys;
+                    if ws.cached_git_projects != projects.names {
+                        ws.cached_git_projects = projects.names;
+                        changed = true;
+                    }
+                }
+            }
+
             if self.workspaces[ws_idx]
                 .resolved_identity_cwd_from(&self.terminals, terminal_runtimes)
                 .as_ref()
@@ -2552,6 +2569,7 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((2, 1)),
                 space: None,
+                projects: None,
             }],
         );
 
@@ -2581,6 +2599,7 @@ mod tests {
                 branch: Some("main".into()),
                 ahead_behind: Some((0, 1)),
                 space: None,
+                projects: None,
             }],
         );
 
@@ -2607,11 +2626,13 @@ mod tests {
                 demand: crate::workspace::GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    projects: false,
                 },
                 auto_label: "one".into(),
                 branch: Some("new".into()),
                 ahead_behind: None,
                 space: None,
+                projects: None,
             }],
         );
 
@@ -2639,6 +2660,7 @@ mod tests {
                 branch: None,
                 ahead_behind: None,
                 space: None,
+                projects: None,
             }],
         );
 
@@ -2673,6 +2695,7 @@ mod tests {
                     repo_root: "/other/repo".into(),
                     is_linked_worktree: false,
                 }),
+                projects: None,
             }],
         );
 

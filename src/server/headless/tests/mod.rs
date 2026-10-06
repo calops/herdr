@@ -4650,6 +4650,7 @@ fn unchanged_git_refresh_does_not_request_headless_render() {
             branch: None,
             ahead_behind: None,
             space: None,
+            projects: None,
         }],
         cache_updates: Vec::new(),
     });
@@ -4676,6 +4677,7 @@ fn changed_git_refresh_requests_headless_render() {
             branch: Some("changed".into()),
             ahead_behind: None,
             space: None,
+            projects: None,
         }],
         cache_updates: Vec::new(),
     });

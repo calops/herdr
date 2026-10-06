@@ -501,14 +501,21 @@ pub(in crate::client::shell) fn workspace_tree_rows(
     for entry in workspace_entries(snapshot, collapsed_groups) {
         let workspace = &snapshot.workspaces[entry.index];
         let status = displayed_workspace_status(snapshot, workspace, collapsed_groups);
-        let mut tokens = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        normalize_tree_tokens(&mut tokens);
         let agents = by_workspace
             .remove(&workspace.workspace_id)
             .unwrap_or_default();
         let has_agents = !agents.is_empty();
         let collapsed =
             collapsed_agents.contains(&(endpoint_id.clone(), workspace.workspace_id.clone()));
+        let mut tokens = if collapsed {
+            vec![vec![crate::ui::ResolvedToken {
+                kind: crate::ui::ResolvedTokenKind::Workspace(workspace.label.clone()),
+                style: Default::default(),
+            }]]
+        } else {
+            workspace_rows(workspace, status, entry.indented, &config.spaces)
+        };
+        normalize_tree_tokens(&mut tokens);
         rows.push(WorkspaceTreeRow::Workspace {
             entry,
             status,
@@ -560,7 +567,18 @@ pub(in crate::client::shell) fn render_tree_row(
             let selected = state
                 .selected_workspace_id
                 .is_some_and(|target| target.matches(endpoint_id, &workspace.workspace_id));
-            let focused = active && workspace.focused;
+            let workspace_focused = active && workspace.focused;
+            let agent_focused = workspace_focused
+                && snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| agent.focused && agent.workspace_id == workspace.workspace_id);
+            let focused = workspace_focused && !agent_focused;
+            let guide_style = Style::default().fg(if workspace_focused {
+                palette.subtext0
+            } else {
+                palette.overlay0
+            });
             let dragged =
                 active && state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
             if hovered && !selected && !focused && !dragged {
@@ -578,6 +596,8 @@ pub(in crate::client::shell) fn render_tree_row(
                 state.selected_workspace_id.is_some(),
                 dragged,
                 *has_agents && !collapsed,
+                *collapsed,
+                guide_style,
                 palette,
             );
             let empty = HashSet::new();
@@ -597,9 +617,6 @@ pub(in crate::client::shell) fn render_tree_row(
                 collapsed_groups,
                 palette,
             );
-            let arrow_right = rect
-                .right()
-                .saturating_sub(u16::from(group_toggle.is_some()));
             hits.workspaces.push(WorkspaceHit {
                 rect,
                 endpoint_id: endpoint_id.clone(),
@@ -607,28 +624,31 @@ pub(in crate::client::shell) fn render_tree_row(
                 indented: entry.indented,
                 group_toggle,
             });
-            if *has_agents {
-                let x = rect.x.saturating_add(if entry.indented { 4 } else { 0 });
-                if x < arrow_right {
-                    let toggle = Rect::new(x, rect.y, 1, 1);
-                    put_text(
-                        buffer,
-                        x,
-                        rect.y,
-                        1,
-                        if *collapsed { "▸" } else { "▾" },
-                        Style::default().fg(palette.overlay0),
-                    );
-                    hits.agent_groups.push((
-                        toggle,
-                        endpoint_id.clone(),
-                        workspace.workspace_id.clone(),
-                    ));
-                }
-            }
+            hits.agent_groups
+                .push((rect, endpoint_id.clone(), workspace.workspace_id.clone()));
         }
         WorkspaceTreeRow::Agent { agent, entry, last } => {
+            let workspace_id = &snapshot.workspaces[entry.index].workspace_id;
+            if let Some((group_rect, _, _)) =
+                hits.agent_groups
+                    .last_mut()
+                    .filter(|(_, group_endpoint, group_workspace)| {
+                        group_endpoint == endpoint_id && group_workspace == workspace_id
+                    })
+            {
+                group_rect.height = rect.bottom().saturating_sub(group_rect.y);
+            } else {
+                // A scrolled group can have visible agents without its header.
+                hits.agent_groups
+                    .push((rect, endpoint_id.clone(), workspace_id.clone()));
+            }
             let focused = active && agent.focused;
+            let guide_style =
+                Style::default().fg(if active && snapshot.workspaces[entry.index].focused {
+                    palette.subtext0
+                } else {
+                    palette.overlay0
+                });
             if focused || hovered {
                 buffer.set_style(
                     rect,
@@ -639,8 +659,8 @@ pub(in crate::client::shell) fn render_tree_row(
                     }),
                 );
             }
-            let indent = if entry.indented { 4 } else { 0 };
-            let trunk_x = rect.x.saturating_add(indent + 2);
+            let indent = if entry.indented { 3 } else { 0 };
+            let trunk_x = rect.x.saturating_add(indent);
             if !last && rect.height > 1 {
                 put_text(
                     buffer,
@@ -648,22 +668,22 @@ pub(in crate::client::shell) fn render_tree_row(
                     rect.y + 1,
                     rect.right().saturating_sub(trunk_x),
                     "│",
-                    Style::default().fg(palette.overlay0),
+                    guide_style,
                 );
             }
             if entry.indented && !entry.last_child {
                 for y in rect.y..rect.bottom() {
                     put_text(
                         buffer,
-                        rect.x + 2,
+                        rect.x,
                         y,
-                        rect.width.saturating_sub(2),
+                        rect.width,
                         "│",
-                        Style::default().fg(palette.overlay0),
+                        guide_style,
                     );
                 }
             }
-            let offset = rect.width.min(indent + 4);
+            let offset = rect.width.min(indent + 2);
             let content = Rect::new(rect.x + offset, rect.y, rect.width - offset, rect.height);
             super::agent_sidebar::render_agent_row(buffer, content, agent, focused, config);
             put_text(
@@ -672,7 +692,7 @@ pub(in crate::client::shell) fn render_tree_row(
                 rect.y,
                 rect.right().saturating_sub(trunk_x),
                 if *last { "╰──" } else { "├──" },
-                Style::default().fg(palette.overlay0),
+                guide_style,
             );
             if endpoint_id.is_local() && state.endpoints.len() <= 1 {
                 hits.agents.push((rect, agent.pane_id.clone()));
@@ -904,6 +924,8 @@ pub(in crate::client::shell) fn render_workspace_rows(
     navigating: bool,
     dragged: bool,
     has_children: bool,
+    folded: bool,
+    guide_style: Style,
     palette: &Palette,
 ) {
     for (row_index, row) in rows.iter().enumerate() {
@@ -911,55 +933,44 @@ pub(in crate::client::shell) fn render_workspace_rows(
         if y >= area.bottom() {
             break;
         }
-        let indent = if entry.indented { 4 } else { 0 };
+        let indent = if entry.indented { 3 } else { 0 };
         if entry.indented {
             let prefix = if row_index == 0 {
                 if entry.last_child {
-                    "  ╰──"
+                    "╰──"
                 } else {
-                    "  ├──"
+                    "├──"
                 }
             } else if entry.last_child {
-                "     "
+                "   "
             } else {
-                "  │  "
+                "│  "
             };
-            put_text(
-                buffer,
-                area.x,
-                y,
-                area.width,
-                prefix,
-                Style::default().fg(palette.overlay0),
-            );
+            put_text(buffer, area.x, y, area.width, prefix, guide_style);
         }
         if row_index > 0 && has_children {
-            let trunk_x = area.x.saturating_add(indent + 2);
+            let trunk_x = area.x.saturating_add(indent);
             put_text(
                 buffer,
                 trunk_x,
                 y,
                 area.right().saturating_sub(trunk_x),
                 "│",
-                Style::default().fg(palette.overlay0),
+                guide_style,
             );
         }
         let x = area
             .x
-            .saturating_add(indent + if row_index == 0 { 2 } else { 4 })
+            .saturating_add(indent + if row_index == 0 { 0 } else { 2 })
             .min(area.right());
-        let highlighted = focused || dragged;
+        let width = area
+            .right()
+            .saturating_sub(if folded { 0 } else { 2 })
+            .saturating_sub(x);
+        let text_width = width.saturating_sub(if folded { 2 } else { 0 });
         let workspace_style = Style::default()
-            .fg(if highlighted {
-                palette.text
-            } else {
-                palette.subtext0
-            })
-            .add_modifier(if highlighted {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            });
+            .fg(palette.text)
+            .add_modifier(Modifier::BOLD);
         let secondary_style = Style::default().fg(if focused {
             palette.mauve
         } else {
@@ -976,12 +987,17 @@ pub(in crate::client::shell) fn render_workspace_rows(
             secondary_style,
             Style::default().fg(palette.overlay1),
             palette,
-            area.right().saturating_sub(2).saturating_sub(x) as usize,
+            text_width as usize,
         );
-        Paragraph::new(Line::from(spans)).render(
-            Rect::new(x, y, area.right().saturating_sub(2).saturating_sub(x), 1),
-            buffer,
-        );
+        let line = Line::from(spans);
+        let name_width = line.width().min(text_width as usize) as u16;
+        Paragraph::new(line).render(Rect::new(x, y, text_width, 1), buffer);
+        if folded {
+            let dots_x = x + name_width + u16::from(name_width > 0);
+            for dot_x in dots_x..x + width {
+                buffer[(dot_x, y)].set_symbol("·").set_fg(palette.overlay0);
+            }
+        }
     }
 
     let background = if selected {

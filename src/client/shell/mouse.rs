@@ -658,7 +658,6 @@ impl ClientShellState {
             .workspaces
             .iter()
             .map(|hit| hit.rect)
-            .chain(self.hits.agent_groups.iter().map(|(rect, _, _)| *rect))
             .chain(self.hits.agents.iter().map(|(rect, _)| *rect))
             .chain(self.hits.endpoint_agents.iter().map(|(rect, _, _)| *rect))
             .find(|rect| super::contains(*rect, point))
@@ -686,6 +685,19 @@ impl ClientShellState {
         self.update_agent_hover(mouse, outcome);
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
+        if self.overlay.is_some()
+            || matches!(
+                mouse.kind,
+                MouseEventKind::Drag(_)
+                    | MouseEventKind::Down(MouseButton::Right | MouseButton::Middle)
+                    | MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            )
+        {
+            self.last_agent_group_click = None;
+        }
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()
             && self.overlay.is_none()
@@ -1901,6 +1913,7 @@ impl ClientShellState {
                 self.selection_highlight_clear_deadline = None;
                 self.word_selection_gesture = None;
                 let previous_pane_click = self.last_pane_click.take();
+                let previous_group_click = self.last_agent_group_click.take();
                 self.workspace_press = None;
                 self.tab_press = None;
                 self.chrome_drag = None;
@@ -1913,11 +1926,27 @@ impl ClientShellState {
                         (endpoint_id.clone(), workspace_id.clone())
                     });
                 if let Some(group) = agent_group {
-                    if !self.collapsed_agent_groups.remove(&group) {
-                        self.collapsed_agent_groups.insert(group);
+                    let now = std::time::Instant::now();
+                    if mouse.modifiers.is_empty() {
+                        let double_click = previous_group_click.is_some_and(
+                            |(endpoint_id, workspace_id, position, at)| {
+                                endpoint_id == group.0
+                                    && workspace_id == group.1
+                                    && position.0.abs_diff(point.0) <= 1
+                                    && position.1 == point.1
+                                    && now.duration_since(at)
+                                        <= std::time::Duration::from_millis(350)
+                            },
+                        );
+                        if double_click {
+                            if !self.collapsed_agent_groups.remove(&group) {
+                                self.collapsed_agent_groups.insert(group);
+                            }
+                            outcome.repaint = true;
+                            return;
+                        }
+                        self.last_agent_group_click = Some((group.0, group.1, point, now));
                     }
-                    outcome.repaint = true;
-                    return;
                 }
                 if super::contains(self.hits.sidebar_divider, point)
                     && !super::contains(self.hits.sidebar_toggle, point)

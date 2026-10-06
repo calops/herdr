@@ -1,22 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::Instant;
 
 use super::{App, GIT_REMOTE_STATUS_REFRESH_INTERVAL, GIT_REPO_DISCOVERY_REFRESH_INTERVAL};
 use crate::events::AppEvent;
-use crate::workspace::{GitStatusCacheEntry, GitStatusRefreshDemand, WorkspaceGitStatus};
+use crate::workspace::{
+    GitStatusCacheEntry, GitStatusRefreshDemand, WorkspaceGitProjects, WorkspaceGitStatus,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceGitRefreshItem {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
     cache_key_hint: Option<PathBuf>,
+    project_cwds: Vec<(PathBuf, Option<PathBuf>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkspaceGitRefreshTarget {
     workspace_id: String,
     resolved_identity_cwd: PathBuf,
+    project: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,14 +97,16 @@ impl App {
     }
 
     pub(crate) fn git_refresh_deadline(&self) -> Option<Instant> {
-        (!self.git_refresh_in_flight
-            && !self.state.workspaces.is_empty()
-            && (self.git_identity_refresh_requested || !self.git_refresh_demand().is_empty()))
-        .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
+        (!self.git_refresh_in_flight && !self.state.workspaces.is_empty())
+            .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
     }
 
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
-        let mut demand = GitStatusRefreshDemand::default();
+        // Project metadata is consumed by client-local layouts, including remote clients.
+        let mut demand = GitStatusRefreshDemand {
+            projects: true,
+            ..GitStatusRefreshDemand::default()
+        };
         for token in self.state.sidebar_spaces.rows.iter().flatten() {
             match token.parts().0 {
                 crate::config::SpaceSidebarToken::Branch => demand.branch = true,
@@ -123,10 +129,21 @@ impl App {
                     ws.resolved_identity_cwd_from(&self.state.terminals, &self.terminal_runtimes)?;
                 let cache_key_hint = (!refresh_repo_discovery && ws.cached_identity_cwd == cwd)
                     .then(|| ws.cached_git_status_key.clone());
+                let project_cwds = ws
+                    .project_cwds_from(&self.state.terminals, &self.terminal_runtimes)
+                    .into_iter()
+                    .map(|cwd| {
+                        let hint = (!refresh_repo_discovery)
+                            .then(|| ws.cached_git_project_keys.get(&cwd).cloned())
+                            .flatten();
+                        (cwd, hint)
+                    })
+                    .collect();
                 Some(WorkspaceGitRefreshItem {
                     workspace_id: ws.id.clone(),
                     resolved_identity_cwd: cwd,
                     cache_key_hint,
+                    project_cwds,
                 })
             })
             .collect()
@@ -141,28 +158,36 @@ fn deduplicate_git_refresh_items(
     let mut jobs = Vec::<WorkspaceGitRefreshJob>::new();
 
     for item in items {
-        let reconcile = item.cache_key_hint.is_none();
-        let cache_key = item.cache_key_hint.unwrap_or_else(|| {
-            crate::workspace::git_status_cache_key(&item.resolved_identity_cwd)
-                .unwrap_or_else(|| item.resolved_identity_cwd.clone())
-        });
-        let target = WorkspaceGitRefreshTarget {
-            workspace_id: item.workspace_id,
-            resolved_identity_cwd: item.resolved_identity_cwd,
-        };
-        if let Some(&index) = indexes.get(&cache_key) {
-            jobs[index].cached = jobs[index].cached.take().filter(|_| !reconcile);
-            jobs[index].targets.push(target);
-            continue;
-        }
+        let targets = std::iter::once((item.resolved_identity_cwd, item.cache_key_hint, false))
+            .chain(
+                item.project_cwds
+                    .into_iter()
+                    .map(|(cwd, hint)| (cwd, hint, true)),
+            );
+        for (cwd, hint, project) in targets {
+            let reconcile = hint.is_none();
+            let cache_key = hint.unwrap_or_else(|| {
+                crate::workspace::git_status_cache_key(&cwd).unwrap_or_else(|| cwd.clone())
+            });
+            let target = WorkspaceGitRefreshTarget {
+                workspace_id: item.workspace_id.clone(),
+                resolved_identity_cwd: cwd,
+                project,
+            };
+            if let Some(&index) = indexes.get(&cache_key) {
+                jobs[index].cached = jobs[index].cached.take().filter(|_| !reconcile);
+                jobs[index].targets.push(target);
+                continue;
+            }
 
-        let cached = cache.get(&cache_key).filter(|_| !reconcile).cloned();
-        indexes.insert(cache_key.clone(), jobs.len());
-        jobs.push(WorkspaceGitRefreshJob {
-            cache_key,
-            cached,
-            targets: vec![target],
-        });
+            let cached = cache.get(&cache_key).filter(|_| !reconcile).cloned();
+            indexes.insert(cache_key.clone(), jobs.len());
+            jobs.push(WorkspaceGitRefreshJob {
+                cache_key,
+                cached,
+                targets: vec![target],
+            });
+        }
     }
 
     jobs
@@ -175,24 +200,59 @@ fn refresh_workspace_git_statuses_with_cache_and_demand(
 ) -> WorkspaceGitRefreshOutput {
     let mut results = Vec::new();
     let mut cache_updates = Vec::new();
+    let mut projects: HashMap<_, _> = if demand.projects {
+        items
+            .iter()
+            .map(|item| {
+                (
+                    item.workspace_id.clone(),
+                    (HashMap::new(), BTreeSet::<String>::new()),
+                )
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
 
     for job in deduplicate_git_refresh_items(items, cache) {
+        let job_demand = if job.targets.iter().any(|target| !target.project) {
+            demand
+        } else {
+            GitStatusRefreshDemand::default()
+        };
         let (snapshot, cache_entry) = crate::workspace::git_status_snapshot_for_cwd_with_demand(
             &job.cache_key,
             job.cached.as_ref(),
-            demand,
+            job_demand,
         );
         if let Some(cache_entry) = cache_entry {
             cache_updates.push((job.cache_key.clone(), cache_entry));
         }
-        results.extend(job.targets.into_iter().map(move |target| {
-            snapshot.clone().into_workspace_status(
-                target.workspace_id,
-                target.resolved_identity_cwd,
-                job.cache_key.clone(),
-                demand,
-            )
-        }));
+        for target in job.targets {
+            if target.project {
+                if let Some((keys, names)) = projects.get_mut(&target.workspace_id) {
+                    keys.insert(target.resolved_identity_cwd, job.cache_key.clone());
+                    if let Some(space) = &snapshot.space {
+                        names.insert(space.repo_name.clone());
+                    }
+                }
+            } else {
+                results.push(snapshot.clone().into_workspace_status(
+                    target.workspace_id,
+                    target.resolved_identity_cwd,
+                    job.cache_key.clone(),
+                    demand,
+                ));
+            }
+        }
+    }
+    for result in &mut results {
+        if let Some((cwd_cache_keys, names)) = projects.remove(&result.workspace_id) {
+            result.projects = Some(WorkspaceGitProjects {
+                cwd_cache_keys,
+                names: names.into_iter().collect::<Vec<_>>().join(", "),
+            });
+        }
     }
 
     WorkspaceGitRefreshOutput {
@@ -227,11 +287,13 @@ mod tests {
                     workspace_id: "one".into(),
                     resolved_identity_cwd: nested.clone(),
                     cache_key_hint: None,
+                    project_cwds: Vec::new(),
                 },
                 WorkspaceGitRefreshItem {
                     workspace_id: "two".into(),
                     resolved_identity_cwd: other.clone(),
                     cache_key_hint: None,
+                    project_cwds: Vec::new(),
                 },
             ],
             &HashMap::new(),
@@ -277,6 +339,7 @@ mod tests {
                 workspace_id: name.into(),
                 resolved_identity_cwd: cache_key.join(name),
                 cache_key_hint: Some(cache_key.clone()),
+                project_cwds: Vec::new(),
             })
             .collect();
 
@@ -360,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn cwd_identity_refresh_runs_once_without_sidebar_git_tokens() {
+    fn cwd_identity_refresh_starts_without_sidebar_git_tokens() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
@@ -376,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn due_git_refresh_does_not_start_without_sidebar_consumer() {
+    fn due_git_refresh_starts_without_sidebar_consumer() {
         let mut config = crate::config::Config::default();
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
@@ -386,8 +449,7 @@ mod tests {
 
         app.start_git_status_refresh_if_due(now);
 
-        assert!(!app.git_refresh_in_flight);
-        assert!(app.event_rx.try_recv().is_err());
+        assert!(app.git_refresh_in_flight);
     }
 
     #[test]
@@ -395,13 +457,18 @@ mod tests {
         let cases = [
             (
                 crate::config::SpaceSidebarToken::Workspace,
-                GitStatusRefreshDemand::default(),
+                GitStatusRefreshDemand {
+                    branch: false,
+                    ahead_behind: false,
+                    projects: true,
+                },
             ),
             (
                 crate::config::SpaceSidebarToken::Branch,
                 GitStatusRefreshDemand {
                     branch: true,
                     ahead_behind: false,
+                    projects: true,
                 },
             ),
             (
@@ -409,6 +476,7 @@ mod tests {
                 GitStatusRefreshDemand {
                     branch: false,
                     ahead_behind: true,
+                    projects: true,
                 },
             ),
         ];
@@ -420,11 +488,6 @@ mod tests {
             app.state.workspaces.push(Workspace::test_new("test"));
 
             assert_eq!(app.git_refresh_demand(), expected, "token: {token:?}");
-            assert_eq!(
-                app.git_refresh_deadline().is_some(),
-                !expected.is_empty(),
-                "token: {token:?}"
-            );
         }
     }
 
@@ -444,7 +507,7 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert!(!app.git_refresh_demand().branch);
     }
 
     #[test]
@@ -462,7 +525,7 @@ mod tests {
         });
         app.state.workspaces.push(child);
 
-        assert_eq!(app.git_refresh_deadline(), None);
+        assert!(!app.git_refresh_demand().branch);
     }
 
     #[test]
